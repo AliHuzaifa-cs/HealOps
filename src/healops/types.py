@@ -3,6 +3,12 @@
 from enum import StrEnum
 
 
+class ObservationKind(StrEnum):
+    HEALTH = "health"
+    METRIC = "metric"
+    DRIFT = "drift"
+
+
 class Severity(StrEnum):
     LOW = "low"
     MEDIUM = "medium"

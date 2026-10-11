@@ -19,3 +19,7 @@ class UnknownApplicationError(HealOpsError):
 
 class ConfigError(HealOpsError):
     """Raised when a configuration file is missing, unreadable or invalid."""
+
+
+class RecordError(HealOpsError):
+    """Raised when a record cannot be converted to or from JSON."""

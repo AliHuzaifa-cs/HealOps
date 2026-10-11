@@ -92,3 +92,13 @@ def test_redeployment_can_still_need_approval_or_be_denied():
 def test_default_policy_cannot_make_redeployment_automatic_either():
     with pytest.raises(ValidationError):
         HealOpsConfig.model_validate({"default_policy": {"verdict": "allow"}})
+
+
+def test_consecutive_breaches_defaults_to_three():
+    assert HealOpsConfig.model_validate({}).thresholds.consecutive_breaches == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1, 21])
+def test_consecutive_breaches_must_be_between_one_and_twenty(bad):
+    with pytest.raises(ValidationError):
+        HealOpsConfig.model_validate({"thresholds": {"consecutive_breaches": bad}})

@@ -20,6 +20,7 @@ class ThresholdsConfig(_StrictModel):
     latency_ms: float | None = Field(default=None, gt=0)
     error_rate: float | None = Field(default=None, ge=0, le=1)
     drift_score: float | None = Field(default=None, ge=0)
+    consecutive_breaches: int = Field(default=3, ge=1, le=20)
 
 
 class ActionPolicy(_StrictModel):

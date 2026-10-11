@@ -9,6 +9,9 @@ thresholds:
   latency_ms: 500
   error_rate: 0.05
   drift_score: 0.3
+# A value must cross its limit this many checks in a row before an incident
+# is created, so one odd reading does not raise a false alarm.
+  consecutive_breaches: 3
 
 # Used for any action that is not listed under "policies".
 default_policy:

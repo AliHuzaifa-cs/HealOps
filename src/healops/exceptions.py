@@ -15,3 +15,7 @@ class ApplicationAlreadyRegisteredError(HealOpsError):
 
 class UnknownApplicationError(HealOpsError):
     """Raised when an application name has not been registered."""
+
+
+class ConfigError(HealOpsError):
+    """Raised when a configuration file is missing, unreadable or invalid."""

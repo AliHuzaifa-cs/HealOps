@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Reusable, model-agnostic framework for detecting, diagnosing and recovering ML applications."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.7"]
+dependencies = ["pydantic>=2.7", "pyyaml>=6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff"]

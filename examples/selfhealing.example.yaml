@@ -1,0 +1,30 @@
+# HealOps example configuration. Copy this to selfhealing.yaml and adjust it.
+# Safe by default: with dry_run true, proposed actions are only logged.
+dry_run: true
+check_interval_seconds: 30
+
+# An incident is created when a value crosses its limit.
+# Remove a line to stop monitoring that value.
+thresholds:
+  latency_ms: 500
+  error_rate: 0.05
+  drift_score: 0.3
+
+# Used for any action that is not listed under "policies".
+default_policy:
+  verdict: needs_approval
+  max_retries: 1
+  cooldown_seconds: 300
+
+# verdict is one of: allow, needs_approval, deny
+policies:
+  reload_model:
+    verdict: allow
+    max_retries: 2
+    cooldown_seconds: 300
+  rollback_model:
+    verdict: needs_approval
+  request_retraining:
+    verdict: needs_approval
+  request_redeployment:
+    verdict: deny

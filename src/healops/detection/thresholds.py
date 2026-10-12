@@ -6,10 +6,10 @@ Observation naming convention (what the monitoring layer must produce):
   * drift:   kind DRIFT, name is the feature or input, value is its drift score
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from healops.config import ThresholdsConfig
+from healops.config import MetricBaseline, ThresholdsConfig
 from healops.detection.base import BreachTracker
 from healops.events import Incident, Observation
 from healops.types import IncidentType, ObservationKind, Severity
@@ -20,7 +20,8 @@ class ThresholdRule:
     """One condition that counts as a breach.
 
     A HEALTH rule has no limit: a False value is the breach. Every other rule
-    needs a limit: a numeric value above it is the breach.
+    needs a limit: a numeric value above it is the breach, or below it when
+    `below` is True (for metrics where a higher value is better).
     """
 
     kind: ObservationKind
@@ -28,10 +29,13 @@ class ThresholdRule:
     severity: Severity
     observation_name: str | None = None  # None means any name of this kind
     limit: float | None = None
+    below: bool = False
 
     def __post_init__(self) -> None:
         if self.kind is ObservationKind.HEALTH and self.limit is not None:
             raise ValueError("a health rule must not have a limit")
+        if self.kind is ObservationKind.HEALTH and self.below:
+            raise ValueError("a health rule cannot use 'below'")
         if self.kind is not ObservationKind.HEALTH and self.limit is None:
             raise ValueError("a metric or drift rule needs a limit")
 
@@ -46,6 +50,8 @@ class ThresholdRule:
             return value is False
         if isinstance(value, bool):
             return False
+        if self.below:
+            return value < self.limit
         return value > self.limit
 
 
@@ -96,14 +102,22 @@ class ThresholdDetector:
     def _summary(self, rule: ThresholdRule, observation: Observation) -> str:
         if rule.limit is None:
             return f"{observation.name} check failed {self._required} times in a row"
+        side = "below" if rule.below else "above"
         return (
-            f"{observation.name} was above {rule.limit:g} for {self._required} "
+            f"{observation.name} was {side} {rule.limit:g} for {self._required} "
             f"checks in a row (latest {float(observation.value):g})"
         )
 
 
-def build_threshold_detector(thresholds: ThresholdsConfig) -> ThresholdDetector:
-    """Build a detector from config. A threshold left as None is not monitored."""
+def build_threshold_detector(
+    thresholds: ThresholdsConfig,
+    metric_degradation: Mapping[str, MetricBaseline] | None = None,
+) -> ThresholdDetector:
+    """Build a detector from config. A threshold left as None is not monitored.
+
+    `metric_degradation` adds one rule per model-quality metric. A metric that
+    is not reported in a check is simply skipped: silence is not a breach.
+    """
     rules = [
         ThresholdRule(
             kind=ObservationKind.HEALTH,
@@ -139,6 +153,18 @@ def build_threshold_detector(thresholds: ThresholdsConfig) -> ThresholdDetector:
                 incident_type=IncidentType.DATA_DRIFT,
                 severity=Severity.LOW,
                 limit=thresholds.drift_score,
+            )
+        )
+    for name, spec in (metric_degradation or {}).items():
+        # A model giving worse predictions is serious even when the service is up.
+        rules.append(
+            ThresholdRule(
+                kind=ObservationKind.METRIC,
+                incident_type=IncidentType.PERFORMANCE_DEGRADATION,
+                severity=Severity.HIGH,
+                observation_name=name,
+                limit=spec.limit,
+                below=spec.higher_is_better,
             )
         )
     return ThresholdDetector(rules, thresholds.consecutive_breaches)

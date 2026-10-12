@@ -9,9 +9,18 @@ thresholds:
   latency_ms: 500
   error_rate: 0.05
   drift_score: 0.3
-# A value must cross its limit this many checks in a row before an incident
-# is created, so one odd reading does not raise a false alarm.
+  # A value must cross its limit this many checks in a row before an incident
+  # is created, so one odd reading does not raise a false alarm.
   consecutive_breaches: 3
+
+# Normal level of the model-quality metrics your application reports.
+# higher_is_better: true  -> a drop of more than max_change is a problem
+# higher_is_better: false -> a rise of more than max_change is a problem
+metric_degradation:
+  f1_score:
+    baseline: 0.90
+    max_change: 0.10
+    higher_is_better: true
 
 # Used for any action that is not listed under "policies".
 default_policy:

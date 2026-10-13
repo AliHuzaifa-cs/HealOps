@@ -7,6 +7,7 @@ boundary with Pydantic. Unknown keys are rejected so a typo such as
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from healops.capabilities import FRAMEWORK_ACTIONS
 from healops.types import ActionType, PolicyVerdict
 
 
@@ -51,6 +52,7 @@ class HealOpsConfig(_StrictModel):
 
     dry_run: bool = True
     check_interval_seconds: int = Field(default=30, ge=1)
+    min_confidence_for_auto: float = Field(default=0.6, ge=0, le=1)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     metric_degradation: dict[str, MetricBaseline] = Field(default_factory=dict)
     default_policy: ActionPolicy = Field(default_factory=ActionPolicy)
@@ -64,6 +66,18 @@ class HealOpsConfig(_StrictModel):
         for name in value:
             if not name.strip():
                 raise ValueError("metric names must not be blank")
+        return value
+
+    @field_validator("policies")
+    @classmethod
+    def _framework_actions_are_not_configurable(
+        cls, value: dict[ActionType, ActionPolicy]
+    ) -> dict[ActionType, ActionPolicy]:
+        for action in value:
+            if action in FRAMEWORK_ACTIONS:
+                raise ValueError(
+                    f"{action.value} is handled by HealOps itself and cannot be configured"
+                )
         return value
 
     @model_validator(mode="after")

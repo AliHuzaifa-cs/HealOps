@@ -8,6 +8,11 @@ check_interval_seconds: 30
 # Confidence can only hold an action back, never grant permission.
 min_confidence_for_auto: 0.6
 
+
+# How long an action waits for a person to approve it. After that the incident
+# is escalated; an action is never approved automatically.
+approval_timeout_seconds: 3600
+
 # An incident is created when a value crosses its limit.
 # Remove a line to stop monitoring that value.
 thresholds:

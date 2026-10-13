@@ -53,6 +53,7 @@ class HealOpsConfig(_StrictModel):
     dry_run: bool = True
     check_interval_seconds: int = Field(default=30, ge=1)
     min_confidence_for_auto: float = Field(default=0.6, ge=0, le=1)
+    approval_timeout_seconds: int = Field(default=3600, ge=1, le=604800)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     metric_degradation: dict[str, MetricBaseline] = Field(default_factory=dict)
     default_policy: ActionPolicy = Field(default_factory=ActionPolicy)

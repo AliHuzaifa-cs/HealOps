@@ -23,3 +23,15 @@ class ConfigError(HealOpsError):
 
 class RecordError(HealOpsError):
     """Raised when a record cannot be converted to or from JSON."""
+
+
+class ApprovalError(HealOpsError):
+    """Base class for problems with a human approval."""
+
+
+class NoPendingApprovalError(ApprovalError):
+    """Raised when nothing is waiting for approval for the given incident and proposal."""
+
+
+class ApprovalExpiredError(ApprovalError):
+    """Raised when someone tries to approve after the approval window has closed."""

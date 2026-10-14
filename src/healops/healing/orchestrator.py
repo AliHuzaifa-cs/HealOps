@@ -2,35 +2,65 @@
 
 It connects the pieces without deciding anything itself: the agent proposes,
 the policy engine permits, people approve, and every move follows the incident
-state machine. This version covers diagnosis, the policy decision, parking for
-approval and escalation. Running the action and verifying it come next.
+state machine. It covers diagnosis, the policy decision, parking for approval,
+escalation and running the approved action (or only logging it in dry-run mode).
+Verifying that the application really recovered comes next.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
+from typing import cast
 
 from healops.agents.base import DiagnosisAgent, DiagnosisContext, PreviousAttempt
-from healops.events import Incident, Observation
+from healops.capabilities import ACTION_REQUIREMENTS
+from healops.events import Incident, Observation, _now
 from healops.healing.approval import ApprovalQueue, PendingApproval
+from healops.healing.history import ActionHistory
 from healops.healing.notify import Alert, AlertKind, NotificationResult, SafeNotifier
 from healops.healing.policy import PolicyEngine
+from healops.interfaces import ComponentRestarter
 from healops.lifecycle import advance
-from healops.outcomes import PolicyDecision
+from healops.outcomes import ActionResult, PolicyDecision
 from healops.records import ActionProposal, Diagnosis
+from healops.redaction import redact_text
 from healops.registry import ApplicationRegistry
-from healops.types import IncidentState, PolicyVerdict
+from healops.types import ActionType, IncidentState, PolicyVerdict
+
+Clock = Callable[[], datetime]
+
+MAX_MESSAGE_LENGTH = 200
+
+# HealOps' own actions change nothing in the application. Each one hands the
+# incident to a person, because the problem is still there.
+_FRAMEWORK_REASONS: dict[ActionType, str] = {
+    ActionType.ESCALATE: "the agent chose to escalate",
+    ActionType.NO_ACTION: "the agent recommended no action, but the problem is not resolved",
+    ActionType.RUN_DIAGNOSTIC: (
+        "a diagnostic was requested, but HealOps cannot collect more evidence automatically yet"
+    ),
+}
+
+_METHOD_NAMES: dict[ActionType, str] = {
+    ActionType.RELOAD_MODEL: "reload_model",
+    ActionType.ROLLBACK_MODEL: "rollback_model",
+    ActionType.REQUEST_RETRAINING: "request_retraining",
+    ActionType.REQUEST_REDEPLOYMENT: "request_redeployment",
+}
 
 
 class HandleStatus(StrEnum):
     READY = "ready_to_execute"
     PARKED = "awaiting_approval"
+    EXECUTED = "executed"
     ESCALATED = "escalated"
 
 
 _STATE_FOR_STATUS = {
     HandleStatus.READY: IncidentState.APPROVED,
     HandleStatus.PARKED: IncidentState.AWAITING_APPROVAL,
+    HandleStatus.EXECUTED: IncidentState.EXECUTED,
     HandleStatus.ESCALATED: IncidentState.ESCALATED,
 }
 
@@ -46,6 +76,7 @@ class HandleResult:
     decision: PolicyDecision | None = None
     notifications: tuple[NotificationResult, ...] = ()
     reason: str | None = None
+    action_result: ActionResult | None = None
 
     def __post_init__(self) -> None:
         expected = _STATE_FOR_STATUS[self.status]
@@ -66,13 +97,24 @@ class Orchestrator:
         policy: PolicyEngine,
         approvals: ApprovalQueue,
         notifier: SafeNotifier,
+        history: ActionHistory | None = None,
+        dry_run: bool = True,
+        clock: Clock = _now,
     ) -> None:
         self._registry = registry
         self._agent = agent
         self._policy = policy
         self._approvals = approvals
         self._notifier = notifier
+        # Use the policy engine's own history so retry limits and cooldowns see
+        # every action that really ran.
+        if history is None:
+            history = policy.history if policy.history is not None else ActionHistory()
+        self._history = history
+        self._dry_run = dry_run
+        self._clock = clock
         self._attempts: dict[str, list[PreviousAttempt]] = {}
+        self._executed: set[str] = set()
 
     def handle(
         self, incident: Incident, recent_observations: Sequence[Observation] = ()
@@ -138,6 +180,101 @@ class Orchestrator:
         incident = advance(incident, IncidentState.APPROVED)
         return HandleResult(incident, HandleStatus.READY, diagnosis, proposal, decision)
 
+    def execute(self, ready: HandleResult) -> HandleResult:
+        """Run the approved action, or only log it in dry-run mode.
+
+        A result can be executed once. A failing callback is never retried
+        automatically: the incident goes to a person.
+        """
+        if ready.status is not HandleStatus.READY or ready.proposal is None:
+            raise ValueError("execute() needs a result that is ready to execute")
+        if ready.incident.incident_id in self._executed:
+            raise ValueError("this incident has already been executed")
+        self._executed.add(ready.incident.incident_id)
+
+        proposal = ready.proposal
+        action = proposal.action_type
+        incident = advance(ready.incident, IncidentState.EXECUTING)
+        context = (ready.diagnosis, proposal, ready.decision)
+
+        if action in _FRAMEWORK_REASONS:
+            return self._escalate(incident, _FRAMEWORK_REASONS[action], *context)
+
+        if self._dry_run:
+            result = self._action_result(
+                proposal, True, False, f"dry-run: {action.value} was not run", self._clock()
+            )
+            reason = f"dry-run: {action.value} would have run (nothing was changed)"
+            return self._escalate(
+                incident, reason, *context, action_result=result, dry_run=True
+            )
+
+        application = self._registry.get(incident.app_name)
+        call, problem = self._prepare(application.adapter, proposal)
+        if call is None:
+            result = self._action_result(proposal, False, False, problem, self._clock())
+            return self._escalate(incident, problem, *context, action_result=result)
+
+        started = self._clock()
+        self._history.record(incident.app_name, incident.incident_id, action, started)
+        try:
+            returned = call()
+        except Exception as error:  # noqa: BLE001 - a failing callback must not crash recovery
+            message = f"{type(error).__name__}: {error}"
+            result = self._action_result(proposal, False, False, message, started)
+            reason = (
+                f"{action.value} failed ({type(error).__name__}); "
+                "it was not retried automatically"
+            )
+            return self._escalate(incident, reason, *context, action_result=result)
+
+        message = str(returned) if returned else f"{action.value} completed"
+        result = self._action_result(proposal, False, True, message, started)
+        incident = advance(incident, IncidentState.EXECUTED)
+        return HandleResult(
+            incident,
+            HandleStatus.EXECUTED,
+            ready.diagnosis,
+            proposal,
+            ready.decision,
+            reason=f"{action.value} ran",
+            action_result=result,
+        )
+
+    def _prepare(
+        self, adapter: object, proposal: ActionProposal
+    ) -> tuple[Callable[[], object] | None, str]:
+        """Return the call to make, or None and the reason it cannot be made."""
+        action = proposal.action_type
+        if not isinstance(adapter, ACTION_REQUIREMENTS[action]):
+            return None, f"the application does not support {action.value}"
+        if action is ActionType.RESTART_COMPONENT:
+            component = proposal.params.get("component")
+            if not component:
+                return None, "restart_component needs a 'component' parameter"
+            restarter = cast(ComponentRestarter, adapter)
+            return (lambda: restarter.restart_component(component)), ""
+        return getattr(adapter, _METHOD_NAMES[action]), ""
+
+    def _action_result(
+        self,
+        proposal: ActionProposal,
+        dry_run: bool,
+        completed: bool,
+        message: str,
+        started: datetime,
+    ) -> ActionResult:
+        ended = max(self._clock(), started)
+        clean = redact_text(message)[:MAX_MESSAGE_LENGTH] or "no message"
+        return ActionResult(
+            proposal_id=proposal.proposal_id,
+            dry_run=dry_run,
+            completed=completed,
+            message=clean,
+            started_at=started,
+            ended_at=ended,
+        )
+
     def approve(self, incident_id: str, proposal_id: str, approver: str) -> HandleResult:
         """A person approved the waiting action. Raises if it is unknown or expired."""
         resolution = self._approvals.approve(incident_id, proposal_id, approver)
@@ -179,6 +316,8 @@ class Orchestrator:
         diagnosis: Diagnosis | None = None,
         proposal: ActionProposal | None = None,
         decision: PolicyDecision | None = None,
+        action_result: ActionResult | None = None,
+        dry_run: bool = False,
     ) -> HandleResult:
         incident = advance(incident, IncidentState.ESCALATED)
         details = [f"incident: {incident.summary}", f"reason: {reason}"]
@@ -188,7 +327,10 @@ class Orchestrator:
             kind=AlertKind.ESCALATED,
             incident_id=incident.incident_id,
             app_name=incident.app_name,
-            title=f"{incident.incident_type.value} on {incident.app_name} needs a person",
+            title=(
+                ("[DRY-RUN] " if dry_run else "")
+                + f"{incident.incident_type.value} on {incident.app_name} needs a person"
+            ),
             details=tuple(details),
         )
         return HandleResult(
@@ -199,4 +341,5 @@ class Orchestrator:
             decision,
             self._notifier.send(alert),
             reason,
+            action_result,
         )

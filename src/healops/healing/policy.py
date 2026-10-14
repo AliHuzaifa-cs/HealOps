@@ -40,6 +40,11 @@ class PolicyEngine:
         self._history = history
         self._clock = clock
 
+    @property
+    def history(self) -> ActionHistory | None:
+        """The history used for retry limits and cooldowns, if any."""
+        return self._history
+
     def evaluate(
         self,
         proposal: ActionProposal,

@@ -3,12 +3,13 @@
 It connects the pieces without deciding anything itself: the agent proposes,
 the policy engine permits, people approve, and every move follows the incident
 state machine. It covers diagnosis, the policy decision, parking for approval,
-escalation and running the approved action (or only logging it in dry-run mode).
-Verifying that the application really recovered comes next.
+escalation, running the approved action (or only logging it in dry-run mode) and
+verifying that the application really recovered. A failed recovery starts a new
+round of diagnosis, up to a limit, and anything unclear goes to a person.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import cast
@@ -22,11 +23,12 @@ from healops.healing.notify import Alert, AlertKind, NotificationResult, SafeNot
 from healops.healing.policy import PolicyEngine
 from healops.interfaces import ComponentRestarter
 from healops.lifecycle import advance
-from healops.outcomes import ActionResult, PolicyDecision
+from healops.outcomes import ActionResult, PolicyDecision, VerificationResult
 from healops.records import ActionProposal, Diagnosis
 from healops.redaction import redact_text
 from healops.registry import ApplicationRegistry
-from healops.types import ActionType, IncidentState, PolicyVerdict
+from healops.types import ActionType, IncidentState, PolicyVerdict, VerificationOutcome
+from healops.verification.base import NoVerifier, Verifier
 
 Clock = Callable[[], datetime]
 
@@ -54,6 +56,7 @@ class HandleStatus(StrEnum):
     READY = "ready_to_execute"
     PARKED = "awaiting_approval"
     EXECUTED = "executed"
+    RESOLVED = "resolved"
     ESCALATED = "escalated"
 
 
@@ -61,6 +64,7 @@ _STATE_FOR_STATUS = {
     HandleStatus.READY: IncidentState.APPROVED,
     HandleStatus.PARKED: IncidentState.AWAITING_APPROVAL,
     HandleStatus.EXECUTED: IncidentState.EXECUTED,
+    HandleStatus.RESOLVED: IncidentState.RESOLVED,
     HandleStatus.ESCALATED: IncidentState.ESCALATED,
 }
 
@@ -77,6 +81,7 @@ class HandleResult:
     notifications: tuple[NotificationResult, ...] = ()
     reason: str | None = None
     action_result: ActionResult | None = None
+    verification: VerificationResult | None = None
 
     def __post_init__(self) -> None:
         expected = _STATE_FOR_STATUS[self.status]
@@ -100,7 +105,12 @@ class Orchestrator:
         history: ActionHistory | None = None,
         dry_run: bool = True,
         clock: Clock = _now,
+        verifier: Verifier | None = None,
+        max_recovery_attempts: int = 3,
+        on_resolved: Callable[[str], None] | None = None,
     ) -> None:
+        if max_recovery_attempts < 1:
+            raise ValueError("max_recovery_attempts must be at least 1")
         self._registry = registry
         self._agent = agent
         self._policy = policy
@@ -113,8 +123,13 @@ class Orchestrator:
         self._history = history
         self._dry_run = dry_run
         self._clock = clock
+        self._verifier = verifier if verifier is not None else NoVerifier()
+        self._max_attempts = max_recovery_attempts
+        self._on_resolved = on_resolved
         self._attempts: dict[str, list[PreviousAttempt]] = {}
+        self._recent: dict[str, tuple[Observation, ...]] = {}
         self._executed: set[str] = set()
+        self._verified: set[str] = set()
 
     def handle(
         self, incident: Incident, recent_observations: Sequence[Observation] = ()
@@ -122,13 +137,18 @@ class Orchestrator:
         """Take a freshly detected incident as far as it can go without a person."""
         if incident.state is not IncidentState.OPEN:
             raise ValueError("handle() needs an incident in the open state")
+        self._recent[incident.incident_id] = tuple(recent_observations)
+        return self._round(incident)
+
+    def _round(self, incident: Incident) -> HandleResult:
+        """One round of diagnosis and decision, from an open or just-verified incident."""
         application = self._registry.get(incident.app_name)
         available = application.capabilities.supported_actions()
         context = DiagnosisContext(
             incident=incident,
             available_actions=available,
             previous_attempts=tuple(self._attempts.get(incident.incident_id, ())),
-            recent_observations=tuple(recent_observations),
+            recent_observations=self._recent.get(incident.incident_id, ()),
         )
 
         try:
@@ -188,9 +208,9 @@ class Orchestrator:
         """
         if ready.status is not HandleStatus.READY or ready.proposal is None:
             raise ValueError("execute() needs a result that is ready to execute")
-        if ready.incident.incident_id in self._executed:
-            raise ValueError("this incident has already been executed")
-        self._executed.add(ready.incident.incident_id)
+        if ready.proposal.proposal_id in self._executed:
+            raise ValueError("this result has already been executed")
+        self._executed.add(ready.proposal.proposal_id)
 
         proposal = ready.proposal
         action = proposal.action_type
@@ -239,6 +259,77 @@ class Orchestrator:
             ready.decision,
             reason=f"{action.value} ran",
             action_result=result,
+        )
+
+    def verify(self, executed: HandleResult) -> HandleResult:
+        """Check whether the application really recovered after the action.
+
+        Verified: the incident is resolved. Failed or partial: another round of
+        diagnosis (the failed action counts as tried), up to the attempt limit.
+        Anything else, or too many failures: a person takes over.
+        """
+        if (
+            executed.status is not HandleStatus.EXECUTED
+            or executed.action_result is None
+            or executed.proposal is None
+        ):
+            raise ValueError("verify() needs an executed result")
+        if executed.proposal.proposal_id in self._verified:
+            raise ValueError("this result has already been verified")
+        self._verified.add(executed.proposal.proposal_id)
+
+        proposal = executed.proposal
+        incident = advance(executed.incident, IncidentState.VERIFYING)
+        application = self._registry.get(incident.app_name)
+        context = (executed.diagnosis, proposal, executed.decision)
+        try:
+            verification = self._verifier.verify(application, incident, executed.action_result)
+        except Exception as error:  # noqa: BLE001 - a broken verifier must not crash recovery
+            reason = f"verification could not run ({type(error).__name__})"
+            return self._escalate(
+                incident, reason, *context, action_result=executed.action_result
+            )
+
+        outcome = verification.outcome
+        if outcome is VerificationOutcome.VERIFIED:
+            incident = advance(incident, IncidentState.RESOLVED)
+            if self._on_resolved is not None:
+                self._on_resolved(incident.incident_id)
+            return HandleResult(
+                incident,
+                HandleStatus.RESOLVED,
+                executed.diagnosis,
+                proposal,
+                executed.decision,
+                reason="recovery verified: " + "; ".join(verification.checks_passed),
+                action_result=executed.action_result,
+                verification=verification,
+            )
+
+        if outcome in (VerificationOutcome.FAILED, VerificationOutcome.PARTIAL):
+            detail = "; ".join(verification.checks_failed) or outcome.value
+            attempts = self._attempts.setdefault(incident.incident_id, [])
+            attempts.append(
+                PreviousAttempt(
+                    proposal.action_type,
+                    outcome,
+                    redact_text(f"{proposal.action_type.value}: {detail}")[:MAX_MESSAGE_LENGTH],
+                )
+            )
+            if len(attempts) < self._max_attempts:
+                return replace(self._round(incident), verification=verification)
+            reason = (
+                f"recovery was not verified after {len(attempts)} attempt(s); "
+                "the attempt limit was reached"
+            )
+        else:
+            reason = f"verification was {outcome.value}; a person must check"
+        return self._escalate(
+            incident,
+            reason,
+            *context,
+            action_result=executed.action_result,
+            verification=verification,
         )
 
     def _prepare(
@@ -318,6 +409,7 @@ class Orchestrator:
         decision: PolicyDecision | None = None,
         action_result: ActionResult | None = None,
         dry_run: bool = False,
+        verification: VerificationResult | None = None,
     ) -> HandleResult:
         incident = advance(incident, IncidentState.ESCALATED)
         details = [f"incident: {incident.summary}", f"reason: {reason}"]
@@ -342,4 +434,5 @@ class Orchestrator:
             self._notifier.send(alert),
             reason,
             action_result,
+            verification,
         )

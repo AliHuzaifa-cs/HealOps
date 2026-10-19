@@ -38,6 +38,24 @@ class MetricBaseline(_StrictModel):
             return self.baseline - self.max_change
         return self.baseline + self.max_change
 
+class VerificationConfig(_StrictModel):
+    """How long and how often to watch an application after a recovery action."""
+
+    settle_seconds: int = Field(default=10, ge=0)
+    checks: int = Field(default=3, ge=1, le=20)
+    interval_seconds: int = Field(default=10, ge=0)
+    max_window_seconds: int = Field(default=300, ge=1)
+
+    @model_validator(mode="after")
+    def _window_stays_within_the_cap(self) -> "VerificationConfig":
+        window = self.settle_seconds + (self.checks - 1) * self.interval_seconds
+        if window > self.max_window_seconds:
+            raise ValueError(
+                f"the verification window ({window}s) is longer than "
+                f"max_window_seconds ({self.max_window_seconds}s)"
+            )
+        return self
+
 
 class ActionPolicy(_StrictModel):
     """How one kind of recovery action may be used."""
@@ -56,6 +74,7 @@ class HealOpsConfig(_StrictModel):
     approval_timeout_seconds: int = Field(default=3600, ge=1, le=604800)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     metric_degradation: dict[str, MetricBaseline] = Field(default_factory=dict)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
     default_policy: ActionPolicy = Field(default_factory=ActionPolicy)
     policies: dict[ActionType, ActionPolicy] = Field(default_factory=dict)
 

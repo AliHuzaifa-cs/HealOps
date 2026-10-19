@@ -32,6 +32,16 @@ metric_degradation:
     max_change: 0.10
     higher_is_better: true
 
+# After an action, HealOps watches the application before calling it recovered.
+# It waits settle_seconds, then checks "checks" times, interval_seconds apart.
+# The whole wait must fit inside max_window_seconds.
+verification:
+  settle_seconds: 10
+  checks: 3
+  interval_seconds: 10
+  max_window_seconds: 300
+  
+  
 # Used for any action that is not listed under "policies".
 default_policy:
   verdict: needs_approval

@@ -109,11 +109,11 @@ class ThresholdDetector:
         )
 
 
-def build_threshold_detector(
+def build_threshold_rules(
     thresholds: ThresholdsConfig,
     metric_degradation: Mapping[str, MetricBaseline] | None = None,
-) -> ThresholdDetector:
-    """Build a detector from config. A threshold left as None is not monitored.
+) -> list[ThresholdRule]:
+    """Turn config into rules. A threshold left as None is not monitored.
 
     `metric_degradation` adds one rule per model-quality metric. A metric that
     is not reported in a check is simply skipped: silence is not a breach.
@@ -167,4 +167,13 @@ def build_threshold_detector(
                 below=spec.higher_is_better,
             )
         )
+    return rules
+
+
+def build_threshold_detector(
+    thresholds: ThresholdsConfig,
+    metric_degradation: Mapping[str, MetricBaseline] | None = None,
+) -> ThresholdDetector:
+    """Build a detector from config."""
+    rules = build_threshold_rules(thresholds, metric_degradation)
     return ThresholdDetector(rules, thresholds.consecutive_breaches)

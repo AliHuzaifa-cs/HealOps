@@ -35,3 +35,15 @@ class NoPendingApprovalError(ApprovalError):
 
 class ApprovalExpiredError(ApprovalError):
     """Raised when someone tries to approve after the approval window has closed."""
+
+
+class AuditError(HealOpsError):
+    """Base class for audit log problems."""
+
+
+class AuditWriteError(AuditError):
+    """Raised when an audit event could not be written."""
+
+
+class AuditReadError(AuditError):
+    """Raised when an audit log file cannot be read back."""

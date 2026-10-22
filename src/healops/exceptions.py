@@ -47,3 +47,9 @@ class AuditWriteError(AuditError):
 
 class AuditReadError(AuditError):
     """Raised when an audit log file cannot be read back."""
+
+class LLMError(HealOpsError):
+    """Raised when a language model could not be reached or gave an unusable reply.
+
+    The message never contains the request, the reply body or any credentials.
+    """

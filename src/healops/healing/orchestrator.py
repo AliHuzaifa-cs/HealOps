@@ -6,8 +6,12 @@ state machine. It covers diagnosis, the policy decision, parking for approval,
 escalation, running the approved action (or only logging it in dry-run mode) and
 verifying that the application really recovered. A failed recovery starts a new
 round of diagnosis, up to a limit, and anything unclear goes to a person.
+
+Every step is written to the audit log. Before a real action runs, the intent
+is written first: if that cannot be recorded, the action does not run.
 """
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -15,6 +19,7 @@ from enum import StrEnum
 from typing import cast
 
 from healops.agents.base import DiagnosisAgent, DiagnosisContext, PreviousAttempt
+from healops.audit import AuditLog, AuditStage, MemoryAuditLog, build_event
 from healops.capabilities import ACTION_REQUIREMENTS
 from healops.events import Incident, Observation, _now
 from healops.healing.approval import ApprovalQueue, PendingApproval
@@ -29,6 +34,8 @@ from healops.redaction import redact_text
 from healops.registry import ApplicationRegistry
 from healops.types import ActionType, IncidentState, PolicyVerdict, VerificationOutcome
 from healops.verification.base import NoVerifier, Verifier
+
+logger = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 
@@ -108,6 +115,7 @@ class Orchestrator:
         verifier: Verifier | None = None,
         max_recovery_attempts: int = 3,
         on_resolved: Callable[[str], None] | None = None,
+        audit: AuditLog | None = None,
     ) -> None:
         if max_recovery_attempts < 1:
             raise ValueError("max_recovery_attempts must be at least 1")
@@ -130,6 +138,39 @@ class Orchestrator:
         self._recent: dict[str, tuple[Observation, ...]] = {}
         self._executed: set[str] = set()
         self._verified: set[str] = set()
+        self.audit: AuditLog = audit if audit is not None else MemoryAuditLog()
+        self.audit_failures: list[str] = []
+
+    def _audit(
+        self,
+        stage: AuditStage,
+        incident: Incident,
+        record: object | None = None,
+        data: dict | None = None,
+        note: str | None = None,
+    ) -> bool:
+        """Write an audit event. A failure is noted and logged but never stops recovery."""
+        try:
+            self._write_audit(stage, incident, record, data, note)
+        except Exception as error:  # noqa: BLE001 - observing must not break healing
+            message = f"audit write failed at {stage.value} ({type(error).__name__})"
+            self.audit_failures.append(message)
+            logger.warning(message)
+            return False
+        return True
+
+    def _write_audit(
+        self,
+        stage: AuditStage,
+        incident: Incident,
+        record: object | None,
+        data: dict | None,
+        note: str | None,
+    ) -> None:
+        event = build_event(
+            stage, incident.incident_id, incident.app_name, record=record, data=data, note=note
+        )
+        self.audit.append(event)
 
     def handle(
         self, incident: Incident, recent_observations: Sequence[Observation] = ()
@@ -138,6 +179,7 @@ class Orchestrator:
         if incident.state is not IncidentState.OPEN:
             raise ValueError("handle() needs an incident in the open state")
         self._recent[incident.incident_id] = tuple(recent_observations)
+        self._audit(AuditStage.INCIDENT_OPENED, incident, record=incident)
         return self._round(incident)
 
     def _round(self, incident: Incident) -> HandleResult:
@@ -159,13 +201,16 @@ class Orchestrator:
 
         diagnosis, proposal = agent_result.diagnosis, agent_result.proposal
         incident = advance(incident, IncidentState.DIAGNOSED)
+        self._audit(AuditStage.DIAGNOSED, incident, record=diagnosis)
         if proposal is None:
             return self._escalate(incident, "the agent proposed no action", diagnosis)
 
         incident = advance(incident, IncidentState.PROPOSED)
+        self._audit(AuditStage.PROPOSED, incident, record=proposal)
         decision = self._policy.evaluate(
             proposal, diagnosis, available, app_name=incident.app_name
         )
+        self._audit(AuditStage.POLICY_DECIDED, incident, record=decision)
 
         if decision.verdict is PolicyVerdict.DENY:
             incident = advance(incident, IncidentState.DENIED)
@@ -176,6 +221,15 @@ class Orchestrator:
         if decision.verdict is PolicyVerdict.NEEDS_APPROVAL:
             incident = advance(incident, IncidentState.AWAITING_APPROVAL)
             pending = self._approvals.add(incident, proposal, decision)
+            self._audit(
+                AuditStage.APPROVAL_REQUESTED,
+                incident,
+                data={
+                    "proposal_id": proposal.proposal_id,
+                    "action": proposal.action_type.value,
+                    "expires_at": pending.expires_at.isoformat(),
+                },
+            )
             alert = Alert(
                 kind=AlertKind.APPROVAL_NEEDED,
                 incident_id=incident.incident_id,
@@ -225,6 +279,7 @@ class Orchestrator:
                 proposal, True, False, f"dry-run: {action.value} was not run", self._clock()
             )
             reason = f"dry-run: {action.value} would have run (nothing was changed)"
+            self._audit(AuditStage.ACTION_FINISHED, incident, record=result)
             return self._escalate(
                 incident, reason, *context, action_result=result, dry_run=True
             )
@@ -236,6 +291,29 @@ class Orchestrator:
             return self._escalate(incident, problem, *context, action_result=result)
 
         started = self._clock()
+        try:
+            # Write-ahead: the intent is recorded before anything changes.
+            self._write_audit(
+                AuditStage.ACTION_STARTING,
+                incident,
+                None,
+                {
+                    "proposal_id": proposal.proposal_id,
+                    "action": action.value,
+                    "params": proposal.params,
+                    "dry_run": False,
+                },
+                None,
+            )
+        except Exception as error:  # noqa: BLE001 - no record means no action
+            self.audit_failures.append(
+                f"audit write failed at {AuditStage.ACTION_STARTING.value} "
+                f"({type(error).__name__})"
+            )
+            reason = "the audit log could not be written, so the action was not run"
+            result = self._action_result(proposal, False, False, reason, started)
+            return self._escalate(incident, reason, *context, action_result=result)
+
         self._history.record(incident.app_name, incident.incident_id, action, started)
         try:
             returned = call()
@@ -246,11 +324,13 @@ class Orchestrator:
                 f"{action.value} failed ({type(error).__name__}); "
                 "it was not retried automatically"
             )
+            self._audit(AuditStage.ACTION_FINISHED, incident, record=result)
             return self._escalate(incident, reason, *context, action_result=result)
 
         message = str(returned) if returned else f"{action.value} completed"
         result = self._action_result(proposal, False, True, message, started)
         incident = advance(incident, IncidentState.EXECUTED)
+        self._audit(AuditStage.ACTION_FINISHED, incident, record=result)
         return HandleResult(
             incident,
             HandleStatus.EXECUTED,
@@ -291,8 +371,10 @@ class Orchestrator:
             )
 
         outcome = verification.outcome
+        self._audit(AuditStage.VERIFIED, incident, record=verification)
         if outcome is VerificationOutcome.VERIFIED:
             incident = advance(incident, IncidentState.RESOLVED)
+            self._audit(AuditStage.RESOLVED, incident, note="recovery verified")
             if self._on_resolved is not None:
                 self._on_resolved(incident.incident_id)
             return HandleResult(
@@ -371,6 +453,11 @@ class Orchestrator:
         resolution = self._approvals.approve(incident_id, proposal_id, approver)
         pending = resolution.pending
         incident = advance(pending.incident, IncidentState.APPROVED)
+        self._audit(
+            AuditStage.APPROVAL_RESOLVED,
+            incident,
+            data={"proposal_id": proposal_id, "approved": True, "approver": approver},
+        )
         return HandleResult(
             incident,
             HandleStatus.READY,
@@ -385,14 +472,36 @@ class Orchestrator:
         """A person refused the waiting action, so the incident is escalated."""
         resolution = self._approvals.reject(incident_id, proposal_id, approver, reason)
         why = f"rejected by {approver}" + (f": {reason}" if reason else "")
+        self._audit(
+            AuditStage.APPROVAL_RESOLVED,
+            resolution.pending.incident,
+            data={
+                "proposal_id": proposal_id,
+                "approved": False,
+                "approver": approver,
+                "reason": reason,
+            },
+        )
         return self._escalate_pending(resolution.pending, why)
 
     def expire_overdue_approvals(self) -> list[HandleResult]:
         """Escalate every incident whose approval time ran out. Never approves anything."""
-        return [
-            self._escalate_pending(resolution.pending, resolution.reason or "timed out")
-            for resolution in self._approvals.expire_overdue()
-        ]
+        results = []
+        for resolution in self._approvals.expire_overdue():
+            self._audit(
+                AuditStage.APPROVAL_RESOLVED,
+                resolution.pending.incident,
+                data={
+                    "proposal_id": resolution.pending.proposal.proposal_id,
+                    "approved": False,
+                    "approver": resolution.approver,
+                    "reason": resolution.reason,
+                },
+            )
+            results.append(
+                self._escalate_pending(resolution.pending, resolution.reason or "timed out")
+            )
+        return results
 
     def _escalate_pending(self, pending: PendingApproval, reason: str) -> HandleResult:
         incident = advance(pending.incident, IncidentState.DENIED)
@@ -412,6 +521,7 @@ class Orchestrator:
         verification: VerificationResult | None = None,
     ) -> HandleResult:
         incident = advance(incident, IncidentState.ESCALATED)
+        self._audit(AuditStage.ESCALATED, incident, note=reason)
         details = [f"incident: {incident.summary}", f"reason: {reason}"]
         if proposal is not None:
             details.append(f"proposed action: {proposal.action_type.value}")

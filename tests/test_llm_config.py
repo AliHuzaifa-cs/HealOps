@@ -169,3 +169,57 @@ def test_the_commented_llm_block_in_the_example_config_is_valid_when_uncommented
     config = parse_config(yaml.safe_load("\n".join(active)))
     assert config.llm.provider == "ollama"
     assert config.llm.model == "llama3.2:3b"
+
+
+# ---------- other OpenAI-style services (for example Gemini) ----------
+
+GEMINI = {
+    "provider": "openai_compatible",
+    "model": "some-model",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "chat_path": "/v1beta/openai/chat/completions",
+    "api_key_env": "GEMINI_API_KEY",
+    "json_mode": False,
+}
+
+
+def test_a_service_with_a_different_path_and_no_json_mode_can_be_configured():
+    sent = []
+
+    def transport(request):
+        sent.append(request)
+        body = {"choices": [{"message": {"content": "{}"}}]}
+        return HttpResponse(200, json.dumps(body).encode())
+
+    config = parse_config({"llm": GEMINI})
+    provider = build_provider(config.llm, transport=transport, environ={"GEMINI_API_KEY": "k"})
+    provider.complete("s", "u")
+    request = sent[0]
+    assert request.url == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    assert request.headers["Authorization"] == "Bearer k"
+    assert "response_format" not in json.loads(request.body)
+
+
+def test_the_default_path_and_json_mode_are_unchanged():
+    sent = []
+
+    def transport(request):
+        sent.append(request)
+        return HttpResponse(200, json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode())
+
+    config = parse_config({"llm": {"provider": "openai", "model": "m"}})
+    build_provider(config.llm, transport=transport, environ={"OPENAI_API_KEY": "k"}).complete(
+        "s", "u"
+    )
+    assert sent[0].url == "https://api.openai.com/v1/chat/completions"
+    assert json.loads(sent[0].body)["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.parametrize("path", ["v1/chat", "/v1/chat?x=1", "/v1/chat#top", "/v1/ chat", ""])
+def test_a_chat_path_must_be_a_plain_path(path):
+    with pytest.raises(ConfigError):
+        parse_config({"llm": {**GEMINI, "chat_path": path}})
+    with pytest.raises(ValueError):
+        OpenAICompatibleProvider("m", api_key_env=None, chat_path=path)

@@ -301,3 +301,55 @@ def test_a_low_confidence_llm_diagnosis_waits_for_a_person():
     result = heal(system, detect(system)[0])
     assert result.status is HandleStatus.PARKED
     assert system.app.actions == []
+
+
+# ---------- prompt content ----------
+
+
+def test_the_prompt_explains_each_allowed_action_and_only_those():
+    from healops.agents.llm import ACTION_GUIDE
+
+    only = frozenset({ActionType.RESTART_COMPONENT, ActionType.ESCALATE})
+    prompt = LLMDiagnosisAgent(Spy(good())).build_prompt(context(available=only))
+    body = json.loads(prompt.removeprefix("<data>").removesuffix("</data>"))
+    assert set(body["action_guide"]) == {"restart_component", "escalate"}
+    assert body["action_guide"]["restart_component"] == ACTION_GUIDE["restart_component"]
+
+
+def test_every_action_type_has_a_guide_line():
+    from healops.agents.llm import ACTION_GUIDE
+
+    assert {a.value for a in ActionType} <= set(ACTION_GUIDE)
+
+
+def test_the_instructions_do_not_push_the_model_towards_escalating():
+    assert "when in doubt" not in SYSTEM_PROMPT.lower()
+    assert "LOW confidence" in SYSTEM_PROMPT
+
+
+def test_the_guide_is_generic_and_names_nothing_specific_to_the_toy_app():
+    # General ML vocabulary (crash, slowness, ...) is allowed, like in any tool
+    # documentation; the names used by the toy app and its test scenarios are not.
+    from healops.agents.llm import ACTION_GUIDE
+
+    text = " ".join(ACTION_GUIDE.values()).lower() + SYSTEM_PROMPT.lower()
+    for word in ("toy", "model-server", "input_distribution", "f1_score", "latency_ms", "llama"):
+        assert word not in text
+
+
+def test_the_agent_reports_its_prompt_version():
+    assert LLMDiagnosisAgent(Spy(good())).prompt_version == "v3"
+
+
+def test_an_action_that_is_not_implemented_yet_is_not_offered_to_the_model():
+    prompt = LLMDiagnosisAgent(Spy(good())).build_prompt(context())
+    body = json.loads(prompt.removeprefix("<data>").removesuffix("</data>"))
+    assert "run_diagnostic" not in body["allowed_actions"]
+    assert "run_diagnostic" not in body["action_guide"]
+    assert "run_diagnostic" not in SYSTEM_PROMPT
+
+
+def test_proposing_an_action_that_was_not_offered_is_rejected():
+    reply = good(probable_cause=None, evidence_used=[], action="run_diagnostic")
+    with pytest.raises(InvalidLLMOutput, match="cannot do"):
+        agent_for(reply).diagnose(context())

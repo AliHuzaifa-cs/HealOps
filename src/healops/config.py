@@ -82,6 +82,8 @@ class LLMConfig(_StrictModel):
     model: str = Field(min_length=1)
     base_url: str | None = None
     api_key_env: str | None = None
+    chat_path: str | None = None
+    json_mode: bool = True
     timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     max_tokens: int = Field(default=800, ge=1, le=8192)
     max_confidence: float = Field(default=0.9, ge=0, le=1)
@@ -103,6 +105,15 @@ class LLMConfig(_StrictModel):
                 "api_key_env must be the NAME of an environment variable "
                 "(letters, digits and underscores), never the key itself"
             )
+        return value
+
+    @field_validator("chat_path")
+    @classmethod
+    def _chat_path_is_a_plain_path(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value.startswith("/") or any(c in value for c in "?# ")
+        ):
+            raise ValueError("chat_path must start with '/' and be a plain path")
         return value
 
     @model_validator(mode="after")

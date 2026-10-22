@@ -45,6 +45,13 @@ metric_degradation:
 #   # base_url: http://localhost:11434
 #   # api_key_env: OPENAI_API_KEY
 #   # timeout_seconds: 120
+#   #
+#   # Any other OpenAI-style service (an example, check its own documentation):
+#   # provider: openai_compatible
+#   # base_url: https://generativelanguage.googleapis.com
+#   # chat_path: /v1beta/openai/chat/completions
+#   # api_key_env: GEMINI_API_KEY
+#   # json_mode: false
 #   max_confidence: 0.9
 #   use_fallback: true
 # --- end llm ---

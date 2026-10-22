@@ -11,6 +11,7 @@ from healops.llm.base import LLMProvider
 from healops.llm.http import Transport
 from healops.llm.providers import (
     ANTHROPIC_URL,
+    DEFAULT_CHAT_PATH,
     OLLAMA_URL,
     OPENAI_URL,
     AnthropicProvider,
@@ -48,6 +49,8 @@ def build_provider(
         llm.model,
         base_url=llm.base_url or OPENAI_URL,
         api_key_env=llm.api_key_env or _DEFAULT_KEY_ENV.get(llm.provider),
+        json_mode=llm.json_mode,
+        chat_path=llm.chat_path or DEFAULT_CHAT_PATH,
         timeout_seconds=timeout or 30.0,
         transport=transport,
         environ=environ,

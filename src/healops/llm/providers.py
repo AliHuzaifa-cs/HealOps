@@ -24,6 +24,7 @@ OPENAI_URL = "https://api.openai.com"
 OLLAMA_URL = "http://localhost:11434"
 ANTHROPIC_VERSION = "2023-06-01"
 MAX_PROMPT_CHARS = 100_000
+DEFAULT_CHAT_PATH = "/v1/chat/completions"
 
 
 def _require_text(value: str, label: str) -> None:
@@ -99,10 +100,14 @@ class OpenAICompatibleProvider(_KeyedProvider):
         transport: Transport | None = None,
         environ: Mapping[str, str] | None = None,
         name: str = "openai-compatible",
+        chat_path: str = DEFAULT_CHAT_PATH,
     ) -> None:
         super().__init__(model, base_url, api_key_env, timeout_seconds, transport, environ)
+        if not chat_path.startswith("/") or "?" in chat_path or "#" in chat_path or " " in chat_path:
+            raise ValueError("chat_path must start with '/' and be a plain path")
         self.name = name
         self._json_mode = json_mode
+        self._chat_path = chat_path
 
     def complete(self, system: str, user: str, max_tokens: int = 1024) -> str:
         _check_prompt(system, user, max_tokens)
@@ -123,7 +128,7 @@ class OpenAICompatibleProvider(_KeyedProvider):
         if key is not None:
             headers["Authorization"] = f"Bearer {key}"
         request = HttpRequest(
-            f"{self._base_url}/v1/chat/completions",
+            f"{self._base_url}{self._chat_path}",
             json.dumps(payload).encode(),
             headers,
             self._timeout,

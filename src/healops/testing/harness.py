@@ -5,7 +5,7 @@ orchestrator, verifier) and adds two small drivers that stand in for the
 monitoring loop that does not exist yet: `detect` and `heal`.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -20,14 +20,14 @@ from healops.events import Incident
 from healops.healing.approval import ApprovalQueue
 from healops.healing.history import ActionHistory
 from healops.healing.notify import RecordingNotifier, SafeNotifier
-from healops.healing.orchestrator import HandleResult, HandleStatus, Orchestrator
+from healops.healing.orchestrator import HandleResult, Orchestrator
 from healops.healing.policy import PolicyEngine
+from healops.loop import drive_to_rest
 from healops.registry import ApplicationRegistry, RegisteredApplication
 from healops.testing.toy_app import COMPONENT, ToyApp
 from healops.verification.postconditions import PostconditionVerifier
 
 APP_NAME = "toy-app"
-MAX_STEPS = 20
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "min_confidence_for_auto": 0.3,
@@ -62,12 +62,14 @@ class ToySystem:
     orchestrator: Orchestrator
     alerts: RecordingNotifier
     audit: MemoryAuditLog
+    registry: ApplicationRegistry
 
 
 def make_toy_system(
     config: HealOpsConfig | Mapping[str, Any] | None = None,
     agent: DiagnosisAgent | None = None,
     dry_run: bool = False,
+    clock: Callable[[], datetime] | None = None,
 ) -> ToySystem:
     """Build a toy application and a full HealOps system around it."""
     if config is None:
@@ -76,6 +78,7 @@ def make_toy_system(
         config = HealOpsConfig.model_validate(dict(config))
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
+    clock = clock if clock is not None else (lambda: now)
     app = ToyApp()
     registry = ApplicationRegistry()
     application = registry.register(APP_NAME, app)
@@ -86,16 +89,16 @@ def make_toy_system(
     orchestrator = Orchestrator(
         registry=registry,
         agent=agent if agent is not None else MockDiagnosisAgent(component=COMPONENT),
-        policy=PolicyEngine(config, history=history, clock=lambda: now),
-        approvals=ApprovalQueue(config.approval_timeout_seconds, clock=lambda: now),
+        policy=PolicyEngine(config, history=history, clock=clock),
+        approvals=ApprovalQueue(config.approval_timeout_seconds, clock=clock),
         notifier=SafeNotifier([alerts]),
         dry_run=dry_run,
-        clock=lambda: now,
+        clock=clock,
         verifier=PostconditionVerifier(config, sleep=lambda _seconds: None),
         on_resolved=detector.release,
         audit=audit,
     )
-    return ToySystem(app, application, detector, orchestrator, alerts, audit)
+    return ToySystem(app, application, detector, orchestrator, alerts, audit, registry)
 
 
 def detect(system: ToySystem, max_checks: int = 10) -> list[Incident]:
@@ -113,13 +116,4 @@ def detect(system: ToySystem, max_checks: int = 10) -> list[Incident]:
 
 def heal(system: ToySystem, incident: Incident) -> HandleResult:
     """Drive one incident until it is resolved, escalated or waiting for a person."""
-    orchestrator = system.orchestrator
-    result = orchestrator.handle(incident)
-    for _ in range(MAX_STEPS):
-        if result.status is HandleStatus.READY:
-            result = orchestrator.execute(result)
-        elif result.status is HandleStatus.EXECUTED:
-            result = orchestrator.verify(result)
-        else:
-            return result
-    raise RuntimeError("the incident did not settle within the step limit")
+    return drive_to_rest(system.orchestrator, system.orchestrator.handle(incident))

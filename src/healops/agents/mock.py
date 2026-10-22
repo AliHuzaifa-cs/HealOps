@@ -7,7 +7,13 @@ low-confidence hypothesis from rules, never a proven root cause.
 
 from collections.abc import Mapping
 
-from healops.agents.base import AgentResult, DiagnosisContext
+from healops.agents.base import (
+    AgentResult,
+    ComponentSpec,
+    DiagnosisContext,
+    check_component_spec,
+    resolve_component,
+)
 from healops.records import ActionProposal, Diagnosis
 from healops.types import ActionType, IncidentType
 
@@ -92,9 +98,10 @@ class MockDiagnosisAgent:
 
     def __init__(
         self,
-        component: str = "application",
+        component: ComponentSpec = "application",
         playbook: Mapping[IncidentType, tuple[ActionType, ...]] | None = None,
     ) -> None:
+        check_component_spec(component)
         self._component = component
         self._playbook = dict(DEFAULT_PLAYBOOK if playbook is None else playbook)
 
@@ -118,7 +125,7 @@ class MockDiagnosisAgent:
                 confidence=MOCK_CONFIDENCE / 2,
                 missing_information=("no untried safe action remains", *context.not_supplied),
             )
-            return AgentResult(diagnosis, self._proposal(diagnosis, ActionType.ESCALATE))
+            return AgentResult(diagnosis, self._proposal(diagnosis, ActionType.ESCALATE, incident.app_name))
 
         cause, alternatives = _HYPOTHESES[incident.incident_type]
         diagnosis = Diagnosis(
@@ -130,10 +137,11 @@ class MockDiagnosisAgent:
             alternatives=alternatives,
             missing_information=context.not_supplied,
         )
-        return AgentResult(diagnosis, self._proposal(diagnosis, chosen))
+        return AgentResult(diagnosis, self._proposal(diagnosis, chosen, incident.app_name))
 
-    def _proposal(self, diagnosis: Diagnosis, action: ActionType) -> ActionProposal:
-        params = {"component": self._component} if action is ActionType.RESTART_COMPONENT else {}
+    def _proposal(self, diagnosis: Diagnosis, action: ActionType, app_name: str) -> ActionProposal:
+        component = resolve_component(self._component, app_name)
+        params = {"component": component} if action is ActionType.RESTART_COMPONENT else {}
         return ActionProposal(
             incident_id=diagnosis.incident_id,
             diagnosis_id=diagnosis.diagnosis_id,

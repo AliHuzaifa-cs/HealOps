@@ -1,5 +1,6 @@
 """The contract between HealOps and a diagnosis agent (mock, rule-based or LLM)."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -9,6 +10,26 @@ from healops.records import ActionProposal, Diagnosis
 from healops.types import ActionType, VerificationOutcome
 
 MAX_RECENT_OBSERVATIONS = 50
+
+# Which component to restart: one name for every application, or a name per application.
+ComponentSpec = str | Mapping[str, str]
+DEFAULT_COMPONENT = "application"
+
+
+def check_component_spec(spec: ComponentSpec) -> None:
+    if not isinstance(spec, str | Mapping):
+        raise TypeError("component must be a string or a mapping of application to component")
+    names = [spec] if isinstance(spec, str) else list(spec.values())
+    if any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ValueError("component names must be non-empty strings")
+
+
+def resolve_component(spec: ComponentSpec, app_name: str) -> str:
+    """The component to restart for `app_name`."""
+    if isinstance(spec, str):
+        return spec
+    return spec.get(app_name, DEFAULT_COMPONENT)
+
 
 # Information a diagnosis could use but this version of HealOps never supplies.
 NOT_SUPPLIED: tuple[str, ...] = ("raw error logs", "model and data version information")

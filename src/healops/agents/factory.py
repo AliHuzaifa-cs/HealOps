@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from healops.agents.base import DiagnosisAgent
+from healops.agents.base import ComponentSpec, DiagnosisAgent
 from healops.agents.fallback import FallbackAgent
 from healops.agents.llm import LLMDiagnosisAgent
 from healops.agents.mock import MockDiagnosisAgent
@@ -61,7 +61,7 @@ def build_provider(
 
 def build_agent(
     config: HealOpsConfig,
-    component: str = "application",
+    component: ComponentSpec = "application",
     transport: Transport | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> DiagnosisAgent:

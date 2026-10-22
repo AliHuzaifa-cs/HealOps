@@ -18,7 +18,13 @@ of control characters and redacted for secrets before they leave HealOps.
 import json
 import re
 
-from healops.agents.base import AgentResult, DiagnosisContext
+from healops.agents.base import (
+    AgentResult,
+    ComponentSpec,
+    DiagnosisContext,
+    check_component_spec,
+    resolve_component,
+)
 from healops.capabilities import FRAMEWORK_ACTIONS
 from healops.exceptions import InvalidLLMOutput
 from healops.llm.base import LLMProvider
@@ -94,12 +100,11 @@ class LLMDiagnosisAgent:
     def __init__(
         self,
         provider: LLMProvider,
-        component: str = "application",
+        component: ComponentSpec = "application",
         max_tokens: int = 800,
         max_confidence: float = DEFAULT_MAX_CONFIDENCE,
     ) -> None:
-        if not component.strip():
-            raise ValueError("component must be a non-empty string")
+        check_component_spec(component)
         if not (0.0 <= max_confidence <= 1.0):
             raise ValueError("max_confidence must be between 0.0 and 1.0")
         self._provider = provider
@@ -230,9 +235,8 @@ class LLMDiagnosisAgent:
         tried = {a.action_type for a in context.previous_attempts}
         if action_type in tried and action_type not in FRAMEWORK_ACTIONS:
             raise InvalidLLMOutput("the model proposed an action that was already tried")
-        params = (
-            {"component": self._component} if action_type is ActionType.RESTART_COMPONENT else {}
-        )
+        component = resolve_component(self._component, context.incident.app_name)
+        params = {"component": component} if action_type is ActionType.RESTART_COMPONENT else {}
         return ActionProposal(
             incident_id=diagnosis.incident_id,
             diagnosis_id=diagnosis.diagnosis_id,

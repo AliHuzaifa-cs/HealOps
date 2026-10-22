@@ -237,6 +237,7 @@ class Orchestrator:
                 title=f"{proposal.action_type.value} needs your approval",
                 details=(
                     f"incident: {incident.summary}",
+                    f"diagnosis: {diagnosis.summary} (confidence {diagnosis.confidence:.2f})",
                     f"proposal_id: {proposal.proposal_id}",
                     f"why approval: {'; '.join(decision.reasons)}",
                     f"approve before: {pending.expires_at.isoformat()}",
@@ -523,6 +524,8 @@ class Orchestrator:
         incident = advance(incident, IncidentState.ESCALATED)
         self._audit(AuditStage.ESCALATED, incident, note=reason)
         details = [f"incident: {incident.summary}", f"reason: {reason}"]
+        if diagnosis is not None:
+            details.append(f"diagnosis: {diagnosis.summary}")
         if proposal is not None:
             details.append(f"proposed action: {proposal.action_type.value}")
         alert = Alert(

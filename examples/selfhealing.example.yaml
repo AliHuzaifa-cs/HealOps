@@ -32,6 +32,23 @@ metric_degradation:
     max_change: 0.10
     higher_is_better: true
 
+# --- llm (optional) ---
+# Let a language model suggest diagnoses. Leave this section out to use the
+# built-in rules only. The model only PROPOSES; the policy still decides, and
+# if the model fails or gives an unusable answer, the rules take over.
+# provider: ollama | openai | anthropic | openai_compatible
+# api_key_env is the NAME of an environment variable holding the key, never the
+# key itself. A local Ollama model needs no key.
+# llm:
+#   provider: ollama
+#   model: llama3.2:3b
+#   # base_url: http://localhost:11434
+#   # api_key_env: OPENAI_API_KEY
+#   # timeout_seconds: 120
+#   max_confidence: 0.9
+#   use_fallback: true
+# --- end llm ---
+
 # After an action, HealOps watches the application before calling it recovered.
 # It waits settle_seconds, then checks "checks" times, interval_seconds apart.
 # The whole wait must fit inside max_window_seconds.

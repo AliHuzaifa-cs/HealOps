@@ -5,6 +5,9 @@ boundary with Pydantic. Unknown keys are rejected so a typo such as
 `latency_msec` cannot silently disable a threshold.
 """
 
+import re
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from healops.capabilities import FRAMEWORK_ACTIONS
@@ -65,6 +68,50 @@ class ActionPolicy(_StrictModel):
     cooldown_seconds: int = Field(default=300, ge=0)
 
 
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class LLMConfig(_StrictModel):
+    """Which language model diagnoses incidents. Leave the whole section out for rules only.
+
+    `api_key_env` is the NAME of an environment variable that holds the key. The
+    key itself must never be written in a configuration file.
+    """
+
+    provider: Literal["ollama", "openai", "anthropic", "openai_compatible"]
+    model: str = Field(min_length=1)
+    base_url: str | None = None
+    api_key_env: str | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    max_tokens: int = Field(default=800, ge=1, le=8192)
+    max_confidence: float = Field(default=0.9, ge=0, le=1)
+    use_fallback: bool = True
+    fallback_confidence_cap: float = Field(default=0.2, ge=0, le=1)
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("model must not be blank")
+        return value
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _api_key_env_is_a_name_not_a_key(cls, value: str | None) -> str | None:
+        if value is not None and not _ENV_NAME.fullmatch(value):
+            raise ValueError(
+                "api_key_env must be the NAME of an environment variable "
+                "(letters, digits and underscores), never the key itself"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _provider_specific_rules(self) -> "LLMConfig":
+        if self.provider == "openai_compatible" and not self.base_url:
+            raise ValueError("provider openai_compatible needs a base_url")
+        return self
+
+
 class HealOpsConfig(_StrictModel):
     """Top-level configuration. Every default is the safe choice."""
 
@@ -77,6 +124,7 @@ class HealOpsConfig(_StrictModel):
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     default_policy: ActionPolicy = Field(default_factory=ActionPolicy)
     policies: dict[ActionType, ActionPolicy] = Field(default_factory=dict)
+    llm: LLMConfig | None = None
 
     @field_validator("metric_degradation")
     @classmethod

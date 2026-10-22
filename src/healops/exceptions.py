@@ -57,3 +57,7 @@ class LLMError(HealOpsError):
 
 class InvalidLLMOutput(LLMError):
     """Raised when a model's reply is not a diagnosis HealOps is willing to use."""
+
+
+class RateLimitExceeded(LLMError):
+    """Raised instead of calling a model when its call budget for the period is used up."""

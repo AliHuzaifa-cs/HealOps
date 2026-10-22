@@ -6,6 +6,7 @@ from healops.agents.base import DiagnosisAgent
 from healops.agents.fallback import FallbackAgent
 from healops.agents.llm import LLMDiagnosisAgent
 from healops.agents.mock import MockDiagnosisAgent
+from healops.agents.ratelimit import RateLimitedAgent
 from healops.config import HealOpsConfig, LLMConfig
 from healops.llm.base import LLMProvider
 from healops.llm.http import Transport
@@ -76,6 +77,9 @@ def build_agent(
         max_tokens=llm.max_tokens,
         max_confidence=llm.max_confidence,
     )
+    limited: DiagnosisAgent = agent
+    if llm.max_calls_per_hour is not None:
+        limited = RateLimitedAgent(agent, llm.max_calls_per_hour, per_seconds=3600.0)
     if not llm.use_fallback:
-        return agent
-    return FallbackAgent(agent, rules, confidence_cap=llm.fallback_confidence_cap)
+        return limited
+    return FallbackAgent(limited, rules, confidence_cap=llm.fallback_confidence_cap)

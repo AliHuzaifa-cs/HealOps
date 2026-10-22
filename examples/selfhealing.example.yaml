@@ -53,6 +53,9 @@ metric_degradation:
 #   # api_key_env: GEMINI_API_KEY
 #   # json_mode: false
 #   max_confidence: 0.9
+#   # At most this many model calls per hour; after that the rules answer instead.
+#   # Use null to switch the limit off.
+#   max_calls_per_hour: 20
 #   use_fallback: true
 # --- end llm ---
 

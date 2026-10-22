@@ -87,6 +87,7 @@ class LLMConfig(_StrictModel):
     timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     max_tokens: int = Field(default=800, ge=1, le=8192)
     max_confidence: float = Field(default=0.9, ge=0, le=1)
+    max_calls_per_hour: int | None = Field(default=20, ge=1, le=100000)
     use_fallback: bool = True
     fallback_confidence_cap: float = Field(default=0.2, ge=0, le=1)
 

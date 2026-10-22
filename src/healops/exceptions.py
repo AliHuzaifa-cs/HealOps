@@ -53,3 +53,7 @@ class LLMError(HealOpsError):
 
     The message never contains the request, the reply body or any credentials.
     """
+
+
+class InvalidLLMOutput(LLMError):
+    """Raised when a model's reply is not a diagnosis HealOps is willing to use."""

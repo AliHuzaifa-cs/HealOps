@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 show_tree.py
+*_audit.jsonl
+*.zip

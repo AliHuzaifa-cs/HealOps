@@ -1,23 +1,47 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "healops"
 version = "0.1.0"
-description = "Reusable, model-agnostic framework for detecting, diagnosing and recovering ML applications."
+description = "Safe, model-agnostic self-healing for machine-learning applications: detect, diagnose, check against policy, act, verify."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ali Huzaifa" }]
+keywords = ["mlops", "self-healing", "monitoring", "llm", "agents", "machine-learning", "reliability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
 dependencies = ["pydantic>=2.7", "pyyaml>=6"]
+
+# Add these once the repository is public:
+# [project.urls]
+# Homepage = "https://github.com/AliHuzaifa-cs/HealOps"
+# Issues = "https://github.com/AliHuzaifa-cs/HealOps/issues"
 
 [project.scripts]
 healops = "healops.cli:run"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff"]
+dev = ["pytest>=8", "ruff", "build", "twine"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+healops = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

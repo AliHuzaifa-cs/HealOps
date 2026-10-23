@@ -10,3 +10,6 @@ show_tree.py
 *.db
 *.db-wal
 *.db-shm
+
+dist/
+build/

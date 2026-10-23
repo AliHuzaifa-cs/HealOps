@@ -1,90 +1,162 @@
 # HealOps
 
-HealOps is a Python framework that watches a machine learning application,
-detects failures, asks an LLM-based agent to propose a recovery action, checks
-that action against deterministic safety policies, runs it only if allowed, and
-verifies whether the application really recovered.
+**Safe, model-agnostic self-healing for machine-learning applications.**
 
-> **Status: early development (Level 1, foundation).** Only the core
-> vocabulary, configuration and application registration exist so far.
-> Detection, the diagnosis agent, the policy engine, the orchestrator and
-> recovery verification are not built yet. Nothing here is production-ready.
+HealOps watches an ML application, detects when it breaks (a crash, a slow service, a
+bad model, drifting data), asks a diagnosis agent what to do, checks the proposal against
+strict policies, carries it out only if allowed, and verifies that the application really
+recovered. People are asked whenever the policy says so.
 
-## The idea
+> **Status: alpha (0.1.0).** The core loop is built and tested, but it has been exercised
+> on a toy application, not yet on production systems. Read
+> [docs/safety-and-limits.md](docs/safety-and-limits.md) before trusting it with anything
+> that matters.
 
+## The one rule
+
+```
 Monitor -> Detect -> Diagnose -> Plan -> Validate -> Act -> Verify -> Record
+```
 
-The key rule is separation of authority:
+| Who | May do | May not do |
+| --- | --- | --- |
+| The **LLM** (or the rule-based agent) | propose a diagnosis and one action | change anything |
+| The **policy engine** | allow, deny, or require a person's approval | invent actions |
+| Your **adapter** | execute an allowed action | decide what to run |
+| The **verifier** | confirm recovery from observed evidence | take the agent's word for it |
 
-- the LLM only **proposes**,
-- a deterministic policy engine **permits**,
-- the application's own adapter **executes**,
-- a verifier **confirms** from observable evidence.
-
-## What exists today
-
-| Module | Purpose |
-| --- | --- |
-| `types.py` | Shared enums: incident states, action types, policy verdicts, outcomes |
-| `events.py` | `Observation` and `Incident` records |
-| `records.py` | `Diagnosis` and `ActionProposal` records |
-| `outcomes.py` | `PolicyDecision`, `ActionResult`, `VerificationResult` records |
-| `lifecycle.py` | Allowed incident state transitions |
-| `interfaces.py` | Eight small capability interfaces an application adapter can implement |
-| `capabilities.py` | Discovers what an adapter can do and which actions are possible |
-| `registry.py` | Registers applications by name |
-| `config.py`, `loader.py` | Validated YAML configuration with safe defaults |
-| `serialization.py` | JSON round trip for records, validated on the way in |
-| `redaction.py` | Best-effort hiding of secrets before logging |
+The language model is never trusted: its output is validated, it can only choose from
+actions your application really supports, its confidence is capped, and if it is down or
+over budget a deterministic rule-based agent takes over. Everything is written to an
+append-only audit log.
 
 ## Install
 
-Python 3.11 or newer is required.
+```
+pip install healops
+```
 
-    python -m venv .venv
-    .venv\Scripts\Activate.ps1        # Windows PowerShell
-    source .venv/bin/activate         # macOS / Linux
-    pip install -e ".[dev]"
+From a source checkout: `pip install -e .` (add `".[dev]"` for the tests and `ruff`).
+Python 3.11 or newer.
 
-## Run the tests
+## Five-minute quickstart
 
-    pytest
-    ruff check src tests
+HealOps ships a tiny fake model service so you can see the whole loop without any setup.
 
-## Example
+```python
+from healops import HealOps
+from healops.testing.toy_app import COMPONENT, Fault, ToyApp
 
-An adapter implements only the capabilities its application really has:
+config = {
+    "dry_run": False,  # let HealOps really act (the default is a safe dry-run)
+    "audit_log_path": "quickstart_audit.jsonl",
+    "state_db_path": "quickstart_state.db",
+    "check_interval_seconds": 1,
+    "min_confidence_for_auto": 0.3,
+    "thresholds": {"latency_ms": 500, "error_rate": 0.05, "consecutive_breaches": 2},
+    "verification": {"settle_seconds": 0, "checks": 2, "interval_seconds": 0},
+    "policies": {"restart_component": {"verdict": "allow", "cooldown_seconds": 0}},
+}
 
-    from healops.registry import ApplicationRegistry
+app = ToyApp()
+healops = HealOps(config)
+healops.register("toy-app", app, component=COMPONENT)
 
-    class MyAdapter:
-        def get_health(self) -> bool:
-            return True
+app.inject(Fault.CRASH)
+print("healthy before:", app.get_health())
+healops.run(max_ticks=6)
+print("healthy after: ", app.get_health())
+print("actions taken: ", app.actions)
+```
 
-        def reload_model(self) -> str:
-            return "model reloaded"
+Expected output:
 
-    registry = ApplicationRegistry()
-    app = registry.register("my-app", MyAdapter())
-    print(app.capabilities.names())
-    # ('HealthProvider', 'ModelReloader')
-    print(sorted(a.value for a in app.capabilities.supported_actions()))
-    # ['escalate', 'no_action', 'reload_model', 'run_diagnostic']
+```
+healthy before: False
+healthy after:  True
+actions taken:  ['restart_component:model-server']
+```
 
-Configuration is a YAML file; see `examples/selfhealing.example.yaml`.
-With no settings at all, HealOps defaults to `dry_run: true`, so proposed
-actions are only logged.
+The same file is [examples/quickstart.py](examples/quickstart.py). The run leaves
+`quickstart_state.db` and `quickstart_audit.jsonl` in the current folder (delete them any time).
 
-## Safety principles
+## Connect your own application
 
-- Actions come from an explicit allowlist (`ActionType`); anything else is rejected.
-- An agent may not name a cause without citing evidence, and may abstain.
-- `executed` is not `resolved`: only a verified recovery resolves an incident.
-- Redeployment can never be fully automatic.
-- Secret redaction is best-effort, not a guarantee.
+You write a small **adapter**: a class with only the methods your application really has
+(`get_health`, `get_metrics`, `restart_component`, ...). HealOps discovers what it can do and
+never calls anything else. See [docs/adapter-guide.md](docs/adapter-guide.md).
 
-## Project layout
+```python
+healops = HealOps.from_config("selfhealing.yaml")
+healops.register("my-model-api", MyAdapter(), component="model-server")
+healops.run()   # until healops.stop() is called
+```
 
-    src/healops/    the framework
-    tests/          automated tests
-    examples/       example configuration
+All settings live in one YAML file, with safe defaults:
+[docs/configuration.md](docs/configuration.md) and
+[examples/selfhealing.example.yaml](examples/selfhealing.example.yaml).
+
+## Which language model?
+
+None is required: without an `llm:` section a rule-based agent is used. To use a model, add
+a few lines of configuration; no code changes, and any provider that speaks the OpenAI
+chat format works (OpenAI, Ollama, Gemini's compatibility endpoint, ...) plus Anthropic.
+
+```yaml
+llm:
+  provider: ollama           # ollama | openai | anthropic | openai_compatible
+  model: llama3.2:3b
+  # api_key_env: OPENAI_API_KEY   # the NAME of an environment variable, never the key
+```
+
+API keys are read from environment variables only. A per-hour call budget
+(`max_calls_per_hour`, default 20) bounds cost, and when the model fails or the budget is
+used up, the rule-based agent answers with its confidence capped, so a person decides.
+
+## Approving from another terminal
+
+When the policy needs a person, HealOps parks the incident and alerts you (console, the
+state store and, if configured, email). Answer from any terminal:
+
+```
+healops list
+healops approve 3f9a1c2e --by ali
+healops reject  3f9a1c2e --by ali --reason "not now"
+```
+
+The command only records your answer in the state file; the running HealOps carries it out
+through the same policy, audit and verification path. An approval that expired is never
+applied. (`python -m healops ...` does the same.)
+
+## What is in the box
+
+| Area | What it does |
+| --- | --- |
+| Detection | thresholds that must hold for several checks in a row; model-quality degradation against a baseline |
+| Diagnosis | rule-based agent; LLM agent with strict JSON validation; automatic fallback; call budget |
+| Policy | allow / needs approval / deny per action, retry limits, cooldowns, minimum confidence |
+| Approval | human-in-the-loop queue that survives restarts; silence is never approval |
+| Safety | dry-run by default; time limits on every adapter call; write-ahead audit before real actions |
+| Verification | re-checks health and the incident's own metric after the action |
+| State | SQLite file with observations, incidents, approvals and alerts (for dashboards) |
+| Alerts | console, state store, email with rate limits |
+
+## Documentation
+
+- [Adapter guide](docs/adapter-guide.md): connect your application
+- [Configuration reference](docs/configuration.md): every option and its default
+- [Safety and known limits](docs/safety-and-limits.md): what is guaranteed and what is not
+
+## Authors and acknowledgements
+
+HealOps is the final-year project "Agentic Self-Healing MLOps".
+
+- Ali Huzaifa (maintainer)
+- _add the other team members here_
+- Supervisor: _add name here_
+
+Thanks to everyone whose feedback shaped the design.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

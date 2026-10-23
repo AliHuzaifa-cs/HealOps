@@ -242,3 +242,52 @@ def test_two_threads_can_write_at_once(store):
     for t in threads:
         t.join()
     assert len(store.observations(limit=1000)) == 200
+
+
+def test_decisions_are_recorded_in_order_and_finished_once(store):
+    first = store.add_decision("inc1", "p1", "approve", "  ali  ", now=T0)
+    second = store.add_decision("inc2", "p2", "reject", "sara", "no", now=T0)
+    waiting = store.waiting_decisions()
+    assert [d.decision_id for d in waiting] == [first, second]
+    assert waiting[0].approver == "ali" and waiting[1].reason == "no"
+    store.finish_decision(first, "applied", "resolved", now=T0)
+    store.finish_decision(first, "failed", "too late", now=T0)  # a second finish changes nothing
+    done = store.decision(first)
+    assert (done.status, done.outcome) == ("applied", "resolved")
+    assert [d.decision_id for d in store.waiting_decisions()] == [second]
+    assert store.decision(999) is None
+
+
+def test_decisions_are_validated(store):
+    with pytest.raises(ValueError):
+        store.add_decision("i", "p", "delete", "ali")
+    with pytest.raises(ValueError):
+        store.add_decision("i", "p", "approve", " ")
+    store.add_decision("i", "p", "approve", "ali")
+    with pytest.raises(ValueError, match="already waiting"):
+        store.add_decision("i", "p", "reject", "ali")
+    store.finish_decision(1, "applied", "x")
+    store.add_decision("i", "p", "reject", "ali")  # fine once the first one is finished
+    with pytest.raises(ValueError):
+        store.finish_decision(1, "waiting", "x")
+
+
+def test_the_heartbeat_round_trips(store):
+    assert store.last_beat() is None
+    store.beat(T0)
+    store.beat(T0 + timedelta(seconds=5))
+    assert store.last_beat() == T0 + timedelta(seconds=5)
+
+
+def test_an_older_state_file_is_upgraded_in_place(tmp_path):
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE incidents (incident_id TEXT PRIMARY KEY, app_name TEXT NOT NULL, "
+               "status TEXT NOT NULL, reason TEXT, incident_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    db.execute("PRAGMA user_version=1")
+    db.commit()
+    db.close()
+    upgraded = StateStore(path)
+    upgraded.add_decision("i", "p", "approve", "ali")
+    upgraded.close()
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

@@ -6,3 +6,7 @@ __pycache__/
 show_tree.py
 *_audit.jsonl
 *.zip
+
+*.db
+*.db-wal
+*.db-shm

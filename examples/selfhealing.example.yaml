@@ -13,6 +13,12 @@ min_confidence_for_auto: 0.6
 # is escalated; an action is never approved automatically.
 approval_timeout_seconds: 3600
 
+# Where HealOps writes its audit trail and remembers its state (observations, incidents,
+# approvals waiting for a person). Use null to keep them in memory only.
+audit_log_path: healops_audit.jsonl
+state_db_path: healops_state.db
+state_retention_days: 30
+
 # An incident is created when a value crosses its limit.
 # Remove a line to stop monitoring that value.
 thresholds:

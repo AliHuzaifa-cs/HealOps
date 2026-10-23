@@ -9,6 +9,7 @@ from healops.testing.toy_app import COMPONENT, Fault, ToyApp
 config = {
     "dry_run": False,  # let HealOps really act (the default is a safe dry-run)
     "audit_log_path": "quickstart_audit.jsonl",
+    "state_db_path": "quickstart_state.db",
     "check_interval_seconds": 1,
     "min_confidence_for_auto": 0.3,
     "thresholds": {"latency_ms": 500, "error_rate": 0.05, "consecutive_breaches": 2},

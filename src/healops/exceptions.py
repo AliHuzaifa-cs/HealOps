@@ -61,3 +61,10 @@ class InvalidLLMOutput(LLMError):
 
 class RateLimitExceeded(LLMError):
     """Raised instead of calling a model when its call budget for the period is used up."""
+
+
+class StateStoreError(HealOpsError):
+    """Raised when HealOps' saved state cannot be read or written.
+
+    The message never contains stored data.
+    """

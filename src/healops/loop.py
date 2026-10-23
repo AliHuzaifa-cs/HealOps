@@ -27,17 +27,29 @@ import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from functools import partial
 from typing import Protocol
 
 from healops.collector import collect
-from healops.events import Incident, Observation
+from healops.events import Incident, Observation, _now
+from healops.exceptions import StateStoreError
 from healops.healing.orchestrator import HandleResult, HandleStatus, Orchestrator
 from healops.registry import ApplicationRegistry
+from healops.store import (
+    ACKNOWLEDGED,
+    AWAITING_APPROVAL,
+    ESCALATED,
+    IN_PROGRESS,
+    RESOLVED,
+    StateStore,
+)
 
 log = logging.getLogger("healops.loop")
 
 MAX_STEPS = 20
 RECENT_PER_APP = 50
+PRUNE_EVERY_TICKS = 500
 
 # Statuses where the incident is finished, or waits for a person.
 _AT_REST = (HandleStatus.RESOLVED, HandleStatus.ESCALATED, HandleStatus.PARKED)
@@ -73,6 +85,15 @@ class TickReport:
     errors: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class RestoreReport:
+    """What was brought back from the saved state at start-up."""
+
+    pending_approvals: int = 0
+    escalated: int = 0
+    interrupted: int = 0
+
+
 @dataclass(slots=True)
 class LoopStats:
     ticks: int = 0
@@ -95,6 +116,8 @@ class MonitoringLoop:
         on_tick: Callable[[TickReport], None] | None = None,
         wait: Callable[[float], bool] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        store: StateStore | None = None,
+        clock: Callable[[], datetime] = _now,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -107,6 +130,8 @@ class MonitoringLoop:
         # `wait(seconds)` returns True when the loop should stop.
         self._wait = wait if wait is not None else self._stop.wait
         self._monotonic = monotonic
+        self._store = store
+        self._clock = clock
         self._recent: dict[str, deque[Observation]] = {}
         self._open: dict[str, HandleResult] = {}
         self.stats = LoopStats()
@@ -153,6 +178,11 @@ class MonitoringLoop:
                 continue
             errors.extend(f"{name}: {message}" for message in collected.errors)
             observed += len(collected.observations)
+            self._guard(
+                errors,
+                "saving observations",
+                partial(self._store_observations, collected),
+            )
             recent = self._recent.setdefault(name, deque(maxlen=RECENT_PER_APP))
             recent.extend(collected.observations)
 
@@ -168,6 +198,9 @@ class MonitoringLoop:
                 if outcome is not None:
                     results.append(outcome)
 
+        if self._store is not None and self.stats.ticks % PRUNE_EVERY_TICKS == 1:
+            store = self._store
+            self._guard(errors, "pruning old observations", lambda: store.prune(self._clock()))
         expired = self._expire(errors)
         self.stats.errors += len(errors)
         report = TickReport(
@@ -190,6 +223,7 @@ class MonitoringLoop:
     def approve(self, incident_id: str, proposal_id: str, approver: str) -> HandleResult:
         """A person approved a waiting action; carry it through to the end."""
         ready = self._orchestrator.approve(incident_id, proposal_id, approver)
+        self._remember(ready.incident, IN_PROGRESS)  # a crash from here on must not lose it
         return self._settle(ready)
 
     def reject(
@@ -200,14 +234,79 @@ class MonitoringLoop:
 
     def acknowledge(self, incident_id: str) -> None:
         """A person dealt with an escalated incident; the same problem may be detected again."""
-        self._open.pop(incident_id, None)
+        result = self._open.pop(incident_id, None)
         self._detector.release(incident_id)
+        if result is not None:
+            self._remember(result.incident, ACKNOWLEDGED, result.reason)
+
+    # ----- restart -----
+
+    def restore(self) -> RestoreReport:
+        """Bring back what the saved state says is still open, after a restart.
+
+        Waiting approvals keep their deadline. Escalated incidents stay open until
+        acknowledged. An incident that was being handled when HealOps stopped is
+        escalated, never retried: an action may or may not have run.
+        """
+        if self._store is None:
+            return RestoreReport()
+        pending_count = escalated_count = interrupted_count = 0
+        for waiting in self._store.pending():
+            self._orchestrator.restore_approval(waiting)
+            self._open[waiting.incident.incident_id] = HandleResult(
+                waiting.incident,
+                HandleStatus.PARKED,
+                proposal=waiting.proposal,
+                decision=waiting.decision,
+                reason="restored after a restart",
+            )
+            self._hold(waiting.incident)
+            pending_count += 1
+        for stored in self._store.incidents([ESCALATED, IN_PROGRESS]):
+            if stored.status == ESCALATED:
+                self._open[stored.incident.incident_id] = HandleResult(
+                    stored.incident, HandleStatus.ESCALATED, reason=stored.reason
+                )
+                self._hold(stored.incident)
+                escalated_count += 1
+            else:
+                result = self._orchestrator.escalate_interrupted(stored.incident)
+                self._open[result.incident.incident_id] = result
+                self._hold(result.incident)
+                self._remember(result.incident, ESCALATED, result.reason)
+                interrupted_count += 1
+        return RestoreReport(pending_count, escalated_count, interrupted_count)
+
+    def _hold(self, incident: Incident) -> None:
+        hold = getattr(self._detector, "hold", None)
+        if hold is not None:
+            hold(incident)
 
     # ----- internals -----
+
+    def _store_observations(self, collected) -> None:
+        if self._store is not None:
+            self._store.add_observations(collected.observations)
+
+    def _remember(self, incident: Incident, status: str, reason: str | None = None) -> None:
+        """Save an incident's latest state. A storage problem is logged, never fatal."""
+        if self._store is None:
+            return
+        try:
+            self._store.save_incident(incident, status, reason, now=self._clock())
+        except StateStoreError:
+            log.warning("could not save an incident's state")
+
+    def _guard(self, errors: list[str], what: str, work: Callable[[], object]) -> None:
+        try:
+            work()
+        except StateStoreError as error:
+            errors.append(self._problem(what, error))
 
     def _handle(
         self, incident: Incident, recent: tuple[Observation, ...], errors: list[str]
     ) -> HandleResult | None:
+        self._remember(incident, IN_PROGRESS)
         try:
             result = drive_to_rest(self._orchestrator, self._orchestrator.handle(incident, recent))
         except Exception as error:  # noqa: BLE001 - an unexpected failure must not stop the loop
@@ -225,11 +324,14 @@ class MonitoringLoop:
             self.stats.resolved += 1
             self._open.pop(incident_id, None)
             self._detector.release(incident_id)
+            self._remember(result.incident, RESOLVED, result.reason)
         else:
             if result.status is HandleStatus.PARKED:
                 self.stats.parked += 1
+                self._remember(result.incident, AWAITING_APPROVAL, result.reason)
             else:
                 self.stats.escalated += 1
+                self._remember(result.incident, ESCALATED, result.reason)
             self._open[incident_id] = result
         return result
 
@@ -242,6 +344,7 @@ class MonitoringLoop:
         for result in expired:
             self.stats.escalated += 1
             self._open[result.incident.incident_id] = result
+            self._remember(result.incident, ESCALATED, result.reason)
         return expired
 
     @staticmethod

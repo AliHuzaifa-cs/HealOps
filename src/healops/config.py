@@ -132,6 +132,8 @@ class HealOpsConfig(_StrictModel):
     min_confidence_for_auto: float = Field(default=0.6, ge=0, le=1)
     approval_timeout_seconds: int = Field(default=3600, ge=1, le=604800)
     audit_log_path: str | None = "healops_audit.jsonl"
+    state_db_path: str | None = "healops_state.db"
+    state_retention_days: int = Field(default=30, ge=1, le=3650)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     metric_degradation: dict[str, MetricBaseline] = Field(default_factory=dict)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
@@ -139,11 +141,11 @@ class HealOpsConfig(_StrictModel):
     policies: dict[ActionType, ActionPolicy] = Field(default_factory=dict)
     llm: LLMConfig | None = None
 
-    @field_validator("audit_log_path")
+    @field_validator("audit_log_path", "state_db_path")
     @classmethod
-    def _audit_log_path_is_not_blank(cls, value: str | None) -> str | None:
+    def _path_is_not_blank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
-            raise ValueError("audit_log_path must not be blank (use null to keep the log in memory)")
+            raise ValueError("a path must not be blank (use null to keep it in memory)")
         return value
 
     @field_validator("metric_degradation")

@@ -36,6 +36,10 @@ class BreachTracker:
         self._counts[key] = count
         return count == self._required
 
+    def hold(self, key: str) -> None:
+        """Treat the problem as already reported (used after a restart)."""
+        self._counts[key] = self._required
+
     def reset(self, key: str) -> None:
         self._counts.pop(key, None)
 

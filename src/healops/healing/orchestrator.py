@@ -67,6 +67,14 @@ class HandleStatus(StrEnum):
     ESCALATED = "escalated"
 
 
+# Steps an incident must take before the state machine allows escalating it.
+_TO_ESCALATABLE: dict[IncidentState, tuple[IncidentState, ...]] = {
+    IncidentState.PROPOSED: (IncidentState.DENIED,),
+    IncidentState.AWAITING_APPROVAL: (IncidentState.DENIED,),
+    IncidentState.APPROVED: (IncidentState.EXECUTING,),
+    IncidentState.EXECUTED: (IncidentState.VERIFYING,),
+}
+
 _STATE_FOR_STATUS = {
     HandleStatus.READY: IncidentState.APPROVED,
     HandleStatus.PARKED: IncidentState.AWAITING_APPROVAL,
@@ -503,6 +511,21 @@ class Orchestrator:
                 self._escalate_pending(resolution.pending, resolution.reason or "timed out")
             )
         return results
+
+    def restore_approval(self, pending: PendingApproval) -> None:
+        """Put back an approval saved before a restart."""
+        self._approvals.restore(pending)
+
+    def escalate_interrupted(self, incident: Incident) -> HandleResult:
+        """An incident was being handled when HealOps stopped. It is never retried by itself:
+        an action may or may not have run, so a person must look."""
+        for step in _TO_ESCALATABLE.get(incident.state, ()):
+            incident = advance(incident, step)
+        return self._escalate(
+            incident,
+            "HealOps stopped while this incident was being handled; check the audit log to "
+            "see whether an action ran",
+        )
 
     def _escalate_pending(self, pending: PendingApproval, reason: str) -> HandleResult:
         incident = advance(pending.incident, IncidentState.DENIED)

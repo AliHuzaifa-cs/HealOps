@@ -13,7 +13,7 @@ from healops.types import IncidentState
 
 
 def make(tmp_path=None, **overrides):
-    data = {**DEFAULT_CONFIG, "dry_run": False, "audit_log_path": None, **overrides}
+    data = {**DEFAULT_CONFIG, "dry_run": False, "audit_log_path": None, "state_db_path": None, **overrides}
     alerts = RecordingNotifier()
     system = HealOps(data, notifiers=[alerts], sleep=lambda _s: None)
     app = ToyApp()
@@ -48,7 +48,7 @@ def test_a_crash_is_detected_and_healed_end_to_end():
 
 
 def test_dry_run_is_the_default_and_changes_nothing():
-    data = {**DEFAULT_CONFIG, "audit_log_path": None}
+    data = {**DEFAULT_CONFIG, "audit_log_path": None, "state_db_path": None}
     data.pop("dry_run", None)
     system = HealOps(data, notifiers=[RecordingNotifier()], sleep=lambda _s: None)
     app = ToyApp()
@@ -61,19 +61,19 @@ def test_dry_run_is_the_default_and_changes_nothing():
 
 
 def test_registering_a_restartable_app_requires_a_component():
-    system = HealOps({**DEFAULT_CONFIG, "audit_log_path": None})
+    system = HealOps({**DEFAULT_CONFIG, "audit_log_path": None, "state_db_path": None})
     with pytest.raises(ValueError, match="component"):
         system.register("toy", ToyApp())
 
 
 def test_a_blank_component_is_rejected():
-    system = HealOps({**DEFAULT_CONFIG, "audit_log_path": None})
+    system = HealOps({**DEFAULT_CONFIG, "audit_log_path": None, "state_db_path": None})
     with pytest.raises(ValueError):
         system.register("toy", ToyApp(), component="  ")
 
 
 def test_running_without_any_application_is_an_error():
-    system = HealOps({**DEFAULT_CONFIG, "audit_log_path": None})
+    system = HealOps({**DEFAULT_CONFIG, "audit_log_path": None, "state_db_path": None})
     with pytest.raises(ValueError, match="register"):
         system.run(max_ticks=1)
     with pytest.raises(ValueError, match="register"):
@@ -92,7 +92,12 @@ def test_each_app_restarts_its_own_component():
 
 def test_the_audit_log_is_written_to_the_configured_file(tmp_path):
     path = tmp_path / "audit.jsonl"
-    data = {**DEFAULT_CONFIG, "dry_run": False, "audit_log_path": str(path)}
+    data = {
+        **DEFAULT_CONFIG,
+        "dry_run": False,
+        "audit_log_path": str(path),
+        "state_db_path": None,
+    }
     system = HealOps(data, notifiers=[RecordingNotifier()], sleep=lambda _s: None)
     app = ToyApp()
     system.register("toy", app, component=COMPONENT)
@@ -103,7 +108,7 @@ def test_the_audit_log_is_written_to_the_configured_file(tmp_path):
 
 def test_a_config_file_path_is_accepted(tmp_path):
     path = tmp_path / "c.yaml"
-    path.write_text("dry_run: false\naudit_log_path: null\nthresholds:\n  latency_ms: 500\n")
+    path.write_text("dry_run: false\naudit_log_path: null\nstate_db_path: null\nthresholds:\n  latency_ms: 500\n")
     system = HealOps.from_config(path)
     assert system.config.thresholds.latency_ms == 500
 
@@ -142,7 +147,7 @@ def test_the_config_is_validated():
 
 
 def test_audit_path_null_keeps_the_log_in_memory():
-    config = HealOpsConfig.model_validate({"audit_log_path": None})
+    config = HealOpsConfig.model_validate({"audit_log_path": None, "state_db_path": None})
     assert config.audit_log_path is None
     assert HealOpsConfig().audit_log_path == "healops_audit.jsonl"
 
@@ -163,3 +168,14 @@ def test_agents_resolve_the_component_per_application():
         MockDiagnosisAgent(component={"a": " "})
     with pytest.raises(TypeError):
         MockDiagnosisAgent(component=5)  # type: ignore[arg-type]
+
+
+def test_state_settings_have_safe_defaults_and_are_validated():
+    config = HealOpsConfig()
+    assert config.state_db_path == "healops_state.db"
+    assert config.state_retention_days == 30
+    assert HealOpsConfig.model_validate({"state_db_path": None}).state_db_path is None
+    with pytest.raises(ValueError):
+        HealOpsConfig.model_validate({"state_db_path": " "})
+    with pytest.raises(ValueError):
+        HealOpsConfig.model_validate({"state_retention_days": 0})

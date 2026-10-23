@@ -28,8 +28,9 @@ from healops.healing.policy import PolicyEngine
 from healops.interfaces import ComponentRestarter
 from healops.llm.http import Transport
 from healops.loader import load_config
-from healops.loop import LoopStats, MonitoringLoop, TickReport
+from healops.loop import LoopStats, MonitoringLoop, RestoreReport, TickReport
 from healops.registry import ApplicationRegistry, RegisteredApplication
+from healops.store import MEMORY, StateStore
 from healops.verification.base import Verifier
 from healops.verification.postconditions import PostconditionVerifier
 
@@ -46,6 +47,7 @@ class HealOps:
         agent: DiagnosisAgent | None = None,
         notifiers: Sequence[Notifier] | None = None,
         audit: AuditLog | None = None,
+        store: StateStore | None = None,
         verifier: Verifier | None = None,
         clock: Callable[[], datetime] = _now,
         sleep: Callable[[float], None] | None = None,
@@ -62,7 +64,10 @@ class HealOps:
         self._registry = ApplicationRegistry()
         self._components: dict[str, str] = {}
         self._detector = build_threshold_detector(config.thresholds, config.metric_degradation)
-        self._approvals = ApprovalQueue(config.approval_timeout_seconds, clock=clock)
+        self._store = store if store is not None else _default_store(config)
+        self._approvals = ApprovalQueue(
+            config.approval_timeout_seconds, clock=clock, store=self._store
+        )
         self._audit = audit if audit is not None else _default_audit(config)
         self._agent = (
             agent
@@ -94,13 +99,25 @@ class HealOps:
             orchestrator,
             interval_seconds=config.check_interval_seconds,
             on_tick=on_tick,
+            store=self._store,
+            clock=clock,
         )
+        self.restored: RestoreReport = self._loop.restore()
         if config.dry_run:
             log.info("HealOps is in dry-run mode: actions are logged but not executed")
 
     @classmethod
     def from_config(cls, path: str | Path, **options: object) -> "HealOps":
         return cls(load_config(path), **options)  # type: ignore[arg-type]
+
+    @property
+    def store(self) -> StateStore:
+        """The saved state (observations, incidents, approvals), for tools such as a dashboard."""
+        return self._store
+
+    def close(self) -> None:
+        """Release the state file."""
+        self._store.close()
 
     # ----- setup -----
 
@@ -171,6 +188,11 @@ def _default_audit(config: HealOpsConfig) -> AuditLog:
     if config.audit_log_path is None:
         return MemoryAuditLog()
     return JsonlAuditLog(config.audit_log_path)
+
+
+def _default_store(config: HealOpsConfig) -> StateStore:
+    path = config.state_db_path if config.state_db_path is not None else MEMORY
+    return StateStore(path, retention_days=config.state_retention_days)
 
 
 SelfHealingAgent = HealOps

@@ -92,6 +92,19 @@ class ThresholdDetector:
                     incidents.append(incident)
         return incidents
 
+    def hold(self, incident: Incident) -> None:
+        """Remember that `incident` is still open (after a restart), so it is not raised twice."""
+        name = incident.evidence[0].name
+        for rule in self._rules:
+            if rule.incident_type is not incident.incident_type:
+                continue
+            if rule.observation_name is not None and rule.observation_name != name:
+                continue
+            key = f"{incident.app_name}|{rule.incident_type.value}|{name}"
+            self._open[incident.incident_id] = key
+            self._tracker.hold(key)
+            return
+
     def release(self, incident_id: str) -> None:
         """Call when an incident is closed, so the same problem can be detected again."""
         key = self._open.pop(incident_id, None)

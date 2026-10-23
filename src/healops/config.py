@@ -124,6 +124,14 @@ class LLMConfig(_StrictModel):
         return self
 
 
+class AdapterTimeoutsConfig(_StrictModel):
+    """How long HealOps waits for the application's adapter, and when it stops trying."""
+
+    read_seconds: float = Field(default=10.0, gt=0, le=600)
+    action_seconds: float = Field(default=120.0, gt=0, le=3600)
+    max_stuck_calls: int = Field(default=3, ge=1, le=50)
+
+
 class HealOpsConfig(_StrictModel):
     """Top-level configuration. Every default is the safe choice."""
 
@@ -137,6 +145,7 @@ class HealOpsConfig(_StrictModel):
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     metric_degradation: dict[str, MetricBaseline] = Field(default_factory=dict)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    adapter_timeouts: AdapterTimeoutsConfig = Field(default_factory=AdapterTimeoutsConfig)
     default_policy: ActionPolicy = Field(default_factory=ActionPolicy)
     policies: dict[ActionType, ActionPolicy] = Field(default_factory=dict)
     llm: LLMConfig | None = None

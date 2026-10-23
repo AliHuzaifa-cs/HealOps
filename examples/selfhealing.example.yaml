@@ -19,6 +19,14 @@ audit_log_path: healops_audit.jsonl
 state_db_path: healops_state.db
 state_retention_days: 30
 
+# Time limits for calls into your application's adapter. A call that takes longer is
+# treated as failed; an action that times out is escalated to a person, never retried.
+# After max_stuck_calls hung calls, the application is treated as unresponsive.
+adapter_timeouts:
+  read_seconds: 10      # health, metrics, drift
+  action_seconds: 120   # restart, reload, rollback, retraining
+  max_stuck_calls: 3
+
 # An incident is created when a value crosses its limit.
 # Remove a line to stop monitoring that value.
 thresholds:

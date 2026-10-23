@@ -68,3 +68,15 @@ class StateStoreError(HealOpsError):
 
     The message never contains stored data.
     """
+
+
+class AdapterError(HealOpsError):
+    """Base class for problems calling an application's adapter."""
+
+
+class AdapterTimeout(AdapterError):
+    """Raised when an adapter call did not finish in time."""
+
+
+class AdapterUnresponsive(AdapterError):
+    """Raised when too many earlier calls to an adapter are still stuck, so none is attempted."""

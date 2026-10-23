@@ -20,6 +20,7 @@ from healops.capabilities import Capabilities
 from healops.config import HealOpsConfig
 from healops.detection.thresholds import build_threshold_detector
 from healops.events import Incident, _now
+from healops.guard import GuardedAdapter
 from healops.healing.approval import ApprovalQueue, PendingApproval
 from healops.healing.history import ActionHistory
 from healops.healing.notify import ConsoleNotifier, Notifier, SafeNotifier
@@ -63,6 +64,7 @@ class HealOps:
 
         self._registry = ApplicationRegistry()
         self._components: dict[str, str] = {}
+        self._guards: dict[str, GuardedAdapter] = {}
         self._detector = build_threshold_detector(config.thresholds, config.metric_degradation)
         self._store = store if store is not None else _default_store(config)
         self._approvals = ApprovalQueue(
@@ -122,12 +124,14 @@ class HealOps:
     # ----- setup -----
 
     def register(
-        self, name: str, adapter: object, component: str | None = None
+        self, name: str, adapter: object, component: str | None = None, guard: bool = True
     ) -> RegisteredApplication:
         """Put an application under HealOps' care.
 
         `component` is the name passed to the adapter's restart method. It is
-        required when the adapter can restart components.
+        required when the adapter can restart components. With `guard` (the default) every
+        adapter call has a time limit (config `adapter_timeouts`); the adapter's methods are
+        then called from helper threads, so they must be safe to call from any thread.
         """
         if component is not None and not component.strip():
             raise ValueError("component must be a non-empty string")
@@ -135,10 +139,27 @@ class HealOps:
             raise ValueError(
                 f"{name!r} can restart components, so register it with component='<name>'"
             )
-        application = self._registry.register(name, adapter)
+        to_register = adapter
+        if guard:
+            limits = self.config.adapter_timeouts
+            guarded = GuardedAdapter(
+                adapter,
+                name,
+                limits.read_seconds,
+                limits.action_seconds,
+                limits.max_stuck_calls,
+            )
+            to_register = guarded
+        application = self._registry.register(name, to_register)  # refuses a name used twice
+        if guard:
+            self._guards[name] = guarded
         if component is not None:
             self._components[name] = component
         return application
+
+    def stuck_calls(self) -> dict[str, int]:
+        """Adapter calls that timed out and are still running, per application."""
+        return {name: guard.stuck_calls for name, guard in self._guards.items()}
 
     # ----- running -----
 

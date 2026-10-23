@@ -33,13 +33,16 @@ from typing import Protocol
 
 from healops.collector import collect
 from healops.events import Incident, Observation, _now
-from healops.exceptions import StateStoreError
+from healops.exceptions import HealOpsError, StateStoreError
 from healops.healing.orchestrator import HandleResult, HandleStatus, Orchestrator
 from healops.registry import ApplicationRegistry
 from healops.store import (
     ACKNOWLEDGED,
+    APPLIED,
+    APPROVE,
     AWAITING_APPROVAL,
     ESCALATED,
+    FAILED,
     IN_PROGRESS,
     RESOLVED,
     StateStore,
@@ -102,6 +105,7 @@ class LoopStats:
     escalated: int = 0
     parked: int = 0
     errors: int = 0
+    decisions: int = 0
 
 
 class MonitoringLoop:
@@ -201,7 +205,10 @@ class MonitoringLoop:
         if self._store is not None and self.stats.ticks % PRUNE_EVERY_TICKS == 1:
             store = self._store
             self._guard(errors, "pruning old observations", lambda: store.prune(self._clock()))
+        self._guard(errors, "applying decisions", lambda: self._apply_decisions(errors))
         expired = self._expire(errors)
+        if self._store is not None:
+            self._guard(errors, "recording the heartbeat", self._store_beat)
         self.stats.errors += len(errors)
         report = TickReport(
             self.stats.ticks, observed, tuple(detected), tuple(results), tuple(expired), tuple(errors)
@@ -238,6 +245,44 @@ class MonitoringLoop:
         self._detector.release(incident_id)
         if result is not None:
             self._remember(result.incident, ACKNOWLEDGED, result.reason)
+
+    # ----- answers from the command line -----
+
+    def _apply_decisions(self, errors: list[str]) -> None:
+        """Apply what people decided from outside this process. Each decision runs once."""
+        if self._store is None:
+            return
+        for decision in self._store.waiting_decisions():
+            try:
+                if decision.action == APPROVE:
+                    result = self.approve(
+                        decision.incident_id, decision.proposal_id, decision.approver
+                    )
+                else:
+                    result = self.reject(
+                        decision.incident_id,
+                        decision.proposal_id,
+                        decision.approver,
+                        decision.reason,
+                    )
+            except StateStoreError:
+                raise  # nothing was decided; it stays waiting and is tried again next tick
+            except HealOpsError as error:
+                self._finish(decision.decision_id, FAILED, f"{type(error).__name__}: {error}")
+            except Exception as error:  # noqa: BLE001 - one decision must not stop the loop
+                errors.append(self._problem("applying a decision", error))
+                self._finish(decision.decision_id, FAILED, f"{type(error).__name__}")
+            else:
+                self._finish(decision.decision_id, APPLIED, result.status.value)
+            self.stats.decisions += 1
+
+    def _finish(self, decision_id: int, status: str, outcome: str) -> None:
+        if self._store is not None:
+            self._store.finish_decision(decision_id, status, outcome, now=self._clock())
+
+    def _store_beat(self) -> None:
+        if self._store is not None:
+            self._store.beat(self._clock())
 
     # ----- restart -----
 

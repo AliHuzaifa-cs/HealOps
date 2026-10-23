@@ -26,7 +26,7 @@ from healops.types import ObservationKind
 
 log = logging.getLogger("healops.store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MEMORY = ":memory:"
 
 # Incident statuses kept in the store.
@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS incidents (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS incidents_by_status ON incidents (status, updated_at);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    approver TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    outcome TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS decisions_by_status ON decisions (status, id);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS approvals (
     incident_id TEXT PRIMARY KEY,
     incident_json TEXT NOT NULL,
@@ -77,6 +91,45 @@ def _stamp(moment: datetime) -> str:
 
 def _parse(text: str) -> datetime:
     return datetime.fromisoformat(text)
+
+
+APPROVE = "approve"
+REJECT = "reject"
+DECISION_ACTIONS = frozenset({APPROVE, REJECT})
+
+WAITING = "waiting"
+APPLIED = "applied"
+FAILED = "failed"
+
+MAX_APPROVER_LENGTH = 100
+MAX_REASON_LENGTH = 500
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """A person's answer to a waiting approval, written by the command line and applied by the
+    running HealOps (only the running process holds the connection to the application)."""
+
+    decision_id: int
+    incident_id: str
+    proposal_id: str
+    action: str
+    approver: str
+    reason: str | None
+    created_at: datetime
+    status: str
+    outcome: str | None
+    finished_at: datetime | None
+
+
+def _check_text(value: str, name: str, limit: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    if len(value) > limit:
+        raise ValueError(f"{name} must be at most {limit} characters")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{name} must not contain control characters")
+    return value.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,3 +360,92 @@ class StateStore:
             )
             for incident, proposal, decision, requested, expires in rows
         ]
+
+    # ----- decisions (people answering approvals from outside the process) -----
+
+    def add_decision(
+        self,
+        incident_id: str,
+        proposal_id: str,
+        action: str,
+        approver: str,
+        reason: str | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Record an answer. Refused if one for the same incident is still waiting."""
+        if action not in DECISION_ACTIONS:
+            raise ValueError(f"action must be one of {sorted(DECISION_ACTIONS)}")
+        approver = _check_text(approver, "approver", MAX_APPROVER_LENGTH)
+        if reason is not None:
+            reason = _check_text(reason, "reason", MAX_REASON_LENGTH)
+        stamp = _stamp(now if now is not None else datetime.now(UTC))
+
+        def work(db: sqlite3.Connection) -> int:
+            if db.execute(
+                "SELECT 1 FROM decisions WHERE incident_id = ? AND status = ?",
+                (incident_id, WAITING),
+            ).fetchone():
+                raise ValueError("a decision for this incident is already waiting to be applied")
+            cursor = db.execute(
+                "INSERT INTO decisions (incident_id, proposal_id, action, approver, reason, "
+                "created_at, status) VALUES (?,?,?,?,?,?,?)",
+                (incident_id, proposal_id, action, approver, reason, stamp, WAITING),
+            )
+            return int(cursor.lastrowid)
+
+        return self._run(work)
+
+    def waiting_decisions(self) -> list[Decision]:
+        """Decisions not yet applied, oldest first."""
+        return self._decisions("WHERE status = ? ORDER BY id", (WAITING,))
+
+    def decision(self, decision_id: int) -> Decision | None:
+        found = self._decisions("WHERE id = ?", (decision_id,))
+        return found[0] if found else None
+
+    def finish_decision(
+        self, decision_id: int, status: str, outcome: str, now: datetime | None = None
+    ) -> None:
+        if status not in (APPLIED, FAILED):
+            raise ValueError("status must be 'applied' or 'failed'")
+        stamp = _stamp(now if now is not None else datetime.now(UTC))
+        self._run(
+            lambda db: db.execute(
+                "UPDATE decisions SET status = ?, outcome = ?, finished_at = ? "
+                "WHERE id = ? AND status = ?",
+                (status, outcome[:500], stamp, decision_id, WAITING),
+            )
+        )
+
+    def _decisions(self, tail: str, args: tuple) -> list[Decision]:
+        sql = (
+            "SELECT id, incident_id, proposal_id, action, approver, reason, created_at, "
+            f"status, outcome, finished_at FROM decisions {tail}"
+        )
+        rows = self._run(lambda db: db.execute(sql, args).fetchall())
+        return [
+            Decision(
+                row[0], row[1], row[2], row[3], row[4], row[5], _parse(row[6]), row[7], row[8],
+                _parse(row[9]) if row[9] else None,
+            )
+            for row in rows
+        ]
+
+    # ----- heartbeat -----
+
+    def beat(self, now: datetime | None = None) -> None:
+        """Note that HealOps is running (so a command line can tell if anything will answer)."""
+        stamp = _stamp(now if now is not None else datetime.now(UTC))
+        self._run(
+            lambda db: db.execute(
+                "INSERT INTO meta (key, value) VALUES ('heartbeat', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (stamp,),
+            )
+        )
+
+    def last_beat(self) -> datetime | None:
+        row = self._run(
+            lambda db: db.execute("SELECT value FROM meta WHERE key = 'heartbeat'").fetchone()
+        )
+        return _parse(row[0]) if row else None

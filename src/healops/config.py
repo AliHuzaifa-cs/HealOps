@@ -124,6 +124,73 @@ class LLMConfig(_StrictModel):
         return self
 
 
+_ADDRESS = re.compile(r"[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+|[^\s@<>,;]+@localhost")
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class EmailConfig(_StrictModel):
+    """Email alerts through SMTP. Leave the whole section out for no email.
+
+    `password_env` is the NAME of an environment variable that holds the password. The
+    password itself must never be written in a configuration file.
+    """
+
+    host: str = Field(min_length=1)
+    port: int = Field(default=587, ge=1, le=65535)
+    security: Literal["starttls", "ssl", "none"] = "starttls"
+    username: str | None = None
+    password_env: str | None = None
+    sender: str
+    recipients: list[str] = Field(min_length=1, max_length=20)
+    timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    max_emails_per_hour: int = Field(default=6, ge=1, le=1000)
+    cooldown_minutes: int = Field(default=15, ge=0, le=1440)
+    email_in_dry_run: bool = False
+    subject_prefix: str = Field(default="[HealOps]", max_length=40)
+
+    @field_validator("host")
+    @classmethod
+    def _host_is_plain(cls, value: str) -> str:
+        if not value.strip() or any(c.isspace() for c in value):
+            raise ValueError("host must be a plain host name")
+        return value
+
+    @field_validator("password_env")
+    @classmethod
+    def _password_env_is_a_name(cls, value: str | None) -> str | None:
+        if value is not None and not _ENV_NAME.fullmatch(value):
+            raise ValueError(
+                "password_env must be the NAME of an environment variable "
+                "(letters, digits and underscores), never the password itself"
+            )
+        return value
+
+    @field_validator("sender", "recipients")
+    @classmethod
+    def _addresses_are_plain(cls, value: str | list[str]) -> str | list[str]:
+        for address in [value] if isinstance(value, str) else value:
+            if not _ADDRESS.fullmatch(address):
+                raise ValueError("email addresses must look like name@example.com")
+        return value
+
+    @field_validator("subject_prefix")
+    @classmethod
+    def _prefix_has_no_line_breaks(cls, value: str) -> str:
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("subject_prefix must not contain control characters")
+        return value
+
+    @model_validator(mode="after")
+    def _consistent_login_and_security(self) -> "EmailConfig":
+        if (self.username is None) != (self.password_env is None):
+            raise ValueError("username and password_env must be given together")
+        if self.security == "none" and self.host.lower() not in _LOCAL_HOSTS:
+            raise ValueError(
+                "security 'none' is only allowed for localhost; use starttls or ssl"
+            )
+        return self
+
+
 class AdapterTimeoutsConfig(_StrictModel):
     """How long HealOps waits for the application's adapter, and when it stops trying."""
 
@@ -149,6 +216,7 @@ class HealOpsConfig(_StrictModel):
     default_policy: ActionPolicy = Field(default_factory=ActionPolicy)
     policies: dict[ActionType, ActionPolicy] = Field(default_factory=dict)
     llm: LLMConfig | None = None
+    email: EmailConfig | None = None
 
     @field_validator("audit_log_path", "state_db_path")
     @classmethod

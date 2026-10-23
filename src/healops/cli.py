@@ -33,6 +33,7 @@ DEFAULT_DB = "healops_state.db"
 DEFAULT_WAIT_SECONDS = 120.0
 STALE_AFTER_SECONDS = 300.0
 POLL_SECONDS = 0.5
+RECENT_ALERTS = 5
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -129,6 +130,14 @@ def cmd_list(args: argparse.Namespace, out: Callable[[str], None], now: datetime
             if e.reason:
                 out(f"      reason: {e.reason}")
         if not escalated:
+            out("  nothing")
+        recent = store.alerts(limit=RECENT_ALERTS)
+        out("")
+        out(f"Recent alerts (newest {RECENT_ALERTS}):")
+        for alert in recent:
+            tag = "[dry-run] " if alert.dry_run else ""
+            out(f"  {_age(alert.created_at, now)}  {alert.kind.value}  [{alert.app_name}] {tag}{alert.title}")
+        if not recent:
             out("  nothing")
         queued = store.waiting_decisions()
         if queued:

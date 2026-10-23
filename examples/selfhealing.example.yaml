@@ -73,6 +73,26 @@ metric_degradation:
 #   use_fallback: true
 # --- end llm ---
 
+# --- email (optional) ---
+# Email alerts when an action needs approval or an incident needs a person. The email only
+# informs you (it tells you which `healops approve ...` command to run); it has no links.
+# The password is read from the environment variable named by password_env, never from here.
+# For Gmail, turn on 2-step verification and create an "App password"
+# (Google Account -> Security -> App passwords), then in PowerShell:
+#   $env:HEALOPS_SMTP_PASSWORD = "<the 16-character app password>"
+# email:
+#   host: smtp.gmail.com
+#   port: 587
+#   security: starttls          # starttls | ssl | none (none only for localhost)
+#   username: you@gmail.com
+#   password_env: HEALOPS_SMTP_PASSWORD
+#   sender: you@gmail.com
+#   recipients: [you@gmail.com]
+#   max_emails_per_hour: 6      # extra alerts are held back and summarised in the next email
+#   cooldown_minutes: 15        # one email per application and incident type in this time
+#   email_in_dry_run: false     # dry-run alerts go to the console and the dashboard only
+# --- end email ---
+
 # After an action, HealOps watches the application before calling it recovered.
 # It waits settle_seconds, then checks "checks" times, interval_seconds apart.
 # The whole wait must fit inside max_window_seconds.

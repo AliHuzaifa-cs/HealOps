@@ -26,12 +26,13 @@ from healops.healing.history import ActionHistory
 from healops.healing.notify import ConsoleNotifier, Notifier, SafeNotifier
 from healops.healing.orchestrator import HandleResult, Orchestrator
 from healops.healing.policy import PolicyEngine
+from healops.healing.smtp import SmtpFactory, SmtpNotifier
 from healops.interfaces import ComponentRestarter
 from healops.llm.http import Transport
 from healops.loader import load_config
 from healops.loop import LoopStats, MonitoringLoop, RestoreReport, TickReport
 from healops.registry import ApplicationRegistry, RegisteredApplication
-from healops.store import MEMORY, StateStore
+from healops.store import MEMORY, StateStore, StoreNotifier
 from healops.verification.base import Verifier
 from healops.verification.postconditions import PostconditionVerifier
 
@@ -55,6 +56,7 @@ class HealOps:
         on_tick: Callable[[TickReport], None] | None = None,
         transport: Transport | None = None,
         environ: Mapping[str, str] | None = None,
+        smtp_factory: SmtpFactory | None = None,
     ) -> None:
         if isinstance(config, (str, Path)):
             config = load_config(config)
@@ -88,7 +90,9 @@ class HealOps:
             agent=self._agent,
             policy=PolicyEngine(config, history=ActionHistory(), clock=clock),
             approvals=self._approvals,
-            notifier=SafeNotifier(list(notifiers) if notifiers is not None else [ConsoleNotifier()]),
+            notifier=SafeNotifier(
+                self._notifiers(notifiers, environ, smtp_factory, clock)
+            ),
             dry_run=config.dry_run,
             clock=clock,
             verifier=verifier_,
@@ -111,6 +115,25 @@ class HealOps:
     @classmethod
     def from_config(cls, path: str | Path, **options: object) -> "HealOps":
         return cls(load_config(path), **options)  # type: ignore[arg-type]
+
+    def _notifiers(
+        self,
+        given: Sequence[Notifier] | None,
+        environ: Mapping[str, str] | None,
+        smtp_factory: SmtpFactory | None,
+        clock: Callable[[], datetime],
+    ) -> list[Notifier]:
+        """Console and email (or the ones you pass), plus the state store so alerts are kept."""
+        if given is not None:
+            channels = list(given)
+        else:
+            channels = [ConsoleNotifier()]
+            if self.config.email is not None:
+                options: dict[str, object] = {"environ": environ, "clock": clock}
+                if smtp_factory is not None:
+                    options["smtp_factory"] = smtp_factory
+                channels.append(SmtpNotifier(self.config.email, **options))  # type: ignore[arg-type]
+        return [*channels, StoreNotifier(self._store)]
 
     @property
     def store(self) -> StateStore:

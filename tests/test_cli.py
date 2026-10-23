@@ -94,7 +94,7 @@ def test_list_on_an_empty_state_says_nothing_is_waiting(tmp_path):
     StateStore(tmp_path / "s.db").close()
     out = Console()
     assert main(["list", "--db", str(tmp_path / "s.db")], out=out, now=lambda: T0) == EXIT_OK
-    assert out.text.count("  nothing\n") + out.text.endswith("  nothing") == 2
+    assert out.text.count("  nothing\n") + out.text.endswith("  nothing") == 3
     assert "never" in out.text
 
 
@@ -287,3 +287,10 @@ def test_applied_status_name_matches_what_the_command_prints(world):
     world.cli("approve", world.incident_id, "--by", "ali", "--no-wait")
     world.system.tick()
     assert _all_decisions(world)[0].status == APPLIED
+
+
+def test_list_shows_recent_alerts(world):
+    world.cli("list")
+    assert "Recent alerts" in world.out.text
+    assert "restart_component needs your approval" in world.out.text
+    assert "approval_needed" in world.out.text

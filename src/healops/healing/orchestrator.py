@@ -242,7 +242,12 @@ class Orchestrator:
                 kind=AlertKind.APPROVAL_NEEDED,
                 incident_id=incident.incident_id,
                 app_name=incident.app_name,
-                title=f"{proposal.action_type.value} needs your approval",
+                incident_type=incident.incident_type.value,
+                dry_run=self._dry_run,
+                title=(
+                    ("[DRY-RUN] " if self._dry_run else "")
+                    + f"{proposal.action_type.value} needs your approval"
+                ),
                 details=(
                     f"incident: {incident.summary}",
                     f"diagnosis: {diagnosis.summary} (confidence {diagnosis.confidence:.2f})",
@@ -555,6 +560,8 @@ class Orchestrator:
             kind=AlertKind.ESCALATED,
             incident_id=incident.incident_id,
             app_name=incident.app_name,
+            incident_type=incident.incident_type.value,
+            dry_run=dry_run,
             title=(
                 ("[DRY-RUN] " if dry_run else "")
                 + f"{incident.incident_type.value} on {incident.app_name} needs a person"

@@ -291,3 +291,30 @@ def test_an_older_state_file_is_upgraded_in_place(tmp_path):
     upgraded.add_decision("i", "p", "approve", "ali")
     upgraded.close()
     assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_alerts_round_trip_newest_first(store):
+    from healops.healing.notify import Alert, AlertKind
+
+    def make(n, dry=False):
+        return Alert(
+            kind=AlertKind.ESCALATED,
+            incident_id=f"inc{n}",
+            app_name="a",
+            title=f"title {n}",
+            details=("one", "two"),
+            created_at=T0 + timedelta(minutes=n),
+            incident_type="high_latency",
+            dry_run=dry,
+        )
+
+    for n in range(3):
+        store.add_alert(make(n, dry=n == 1))
+    found = store.alerts()
+    assert [a.title for a in found] == ["title 2", "title 1", "title 0"]
+    assert found[1].dry_run is True and found[0].dry_run is False
+    assert found[0].details == ("one", "two") and found[0].incident_type == "high_latency"
+    assert [a.title for a in store.alerts(limit=1)] == ["title 2"]
+    assert [a.title for a in store.alerts(since=T0 + timedelta(minutes=1))] == ["title 2", "title 1"]
+    with pytest.raises(ValueError):
+        store.alerts(limit=0)

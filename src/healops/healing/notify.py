@@ -33,6 +33,8 @@ class Alert:
     title: str
     details: tuple[str, ...] = ()
     created_at: datetime = field(default_factory=_now)
+    incident_type: str | None = None
+    dry_run: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, AlertKind):

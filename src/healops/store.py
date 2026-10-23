@@ -19,6 +19,7 @@ from pathlib import Path
 from healops.events import Incident, Observation
 from healops.exceptions import StateStoreError
 from healops.healing.approval import PendingApproval
+from healops.healing.notify import Alert, AlertKind
 from healops.outcomes import PolicyDecision
 from healops.records import ActionProposal
 from healops.serialization import record_from_json, record_to_json
@@ -26,7 +27,7 @@ from healops.types import ObservationKind
 
 log = logging.getLogger("healops.store")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MEMORY = ":memory:"
 
 # Incident statuses kept in the store.
@@ -72,6 +73,18 @@ CREATE TABLE IF NOT EXISTS decisions (
     finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS decisions_by_status ON decisions (status, id);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    app_name TEXT NOT NULL,
+    incident_type TEXT,
+    dry_run INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    details TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alerts_by_time ON alerts (created_at);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS approvals (
     incident_id TEXT PRIMARY KEY,
@@ -449,3 +462,57 @@ class StateStore:
             lambda db: db.execute("SELECT value FROM meta WHERE key = 'heartbeat'").fetchone()
         )
         return _parse(row[0]) if row else None
+
+    # ----- alerts -----
+
+    def add_alert(self, alert: Alert) -> None:
+        self._run(
+            lambda db: db.execute(
+                "INSERT INTO alerts (created_at, kind, incident_id, app_name, incident_type, "
+                "dry_run, title, details) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    _stamp(alert.created_at),
+                    alert.kind.value,
+                    alert.incident_id,
+                    alert.app_name,
+                    alert.incident_type,
+                    1 if alert.dry_run else 0,
+                    alert.title,
+                    json.dumps(list(alert.details)),
+                ),
+            )
+        )
+
+    def alerts(self, limit: int = 100, since: datetime | None = None) -> list[Alert]:
+        """The newest alerts, newest first."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        clause, args = ("WHERE created_at >= ?", [_stamp(since)]) if since else ("", [])
+        sql = (
+            "SELECT created_at, kind, incident_id, app_name, incident_type, dry_run, title, "
+            f"details FROM alerts {clause} ORDER BY created_at DESC, id DESC LIMIT ?"
+        )
+        rows = self._run(lambda db: db.execute(sql, [*args, limit]).fetchall())
+        return [
+            Alert(
+                kind=AlertKind(kind),
+                incident_id=incident_id,
+                app_name=app,
+                title=title,
+                details=tuple(json.loads(details)),
+                created_at=_parse(created),
+                incident_type=incident_type,
+                dry_run=bool(dry_run),
+            )
+            for created, kind, incident_id, app, incident_type, dry_run, title, details in rows
+        ]
+
+
+class StoreNotifier:
+    """Keeps every alert in the state store, so a dashboard or `healops list` can show it."""
+
+    def __init__(self, store: StateStore) -> None:
+        self._store = store
+
+    def notify(self, alert: Alert) -> None:
+        self._store.add_alert(alert)

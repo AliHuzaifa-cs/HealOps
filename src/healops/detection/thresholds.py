@@ -92,6 +92,10 @@ class ThresholdDetector:
                     incidents.append(incident)
         return incidents
 
+    def watched(self) -> frozenset[tuple[ObservationKind, str | None]]:
+        """What the rules look at: (kind, name), with name None for 'any of this kind'."""
+        return frozenset((rule.kind, rule.observation_name) for rule in self._rules)
+
     def hold(self, incident: Incident) -> None:
         """Remember that `incident` is still open (after a restart), so it is not raised twice."""
         name = incident.evidence[0].name

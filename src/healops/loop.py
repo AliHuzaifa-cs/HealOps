@@ -35,6 +35,7 @@ from healops.collector import collect
 from healops.events import Incident, Observation, _now
 from healops.exceptions import HealOpsError, StateStoreError
 from healops.healing.orchestrator import HandleResult, HandleStatus, Orchestrator
+from healops.interfaces import DriftProvider, HealthProvider, MetricsProvider
 from healops.registry import ApplicationRegistry
 from healops.store import (
     ACKNOWLEDGED,
@@ -47,6 +48,7 @@ from healops.store import (
     RESOLVED,
     StateStore,
 )
+from healops.types import ObservationKind
 
 log = logging.getLogger("healops.loop")
 
@@ -86,6 +88,7 @@ class TickReport:
     results: tuple[HandleResult, ...] = ()
     expired: tuple[HandleResult, ...] = ()
     errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,7 @@ class LoopStats:
     parked: int = 0
     errors: int = 0
     decisions: int = 0
+    warnings: int = 0
 
 
 class MonitoringLoop:
@@ -122,6 +126,7 @@ class MonitoringLoop:
         monotonic: Callable[[], float] = time.monotonic,
         store: StateStore | None = None,
         clock: Callable[[], datetime] = _now,
+        warn_after_checks: int = 5,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -136,6 +141,12 @@ class MonitoringLoop:
         self._monotonic = monotonic
         self._store = store
         self._clock = clock
+        if warn_after_checks < 0:
+            raise ValueError("warn_after_checks must not be negative")
+        self._warn_after = warn_after_checks
+        self._checks: dict[str, int] = {}
+        self._seen: dict[str, set[tuple[ObservationKind, str]]] = {}
+        self._warned: set[tuple[str, ObservationKind, str | None]] = set()
         self._recent: dict[str, deque[Observation]] = {}
         self._open: dict[str, HandleResult] = {}
         self.stats = LoopStats()
@@ -189,6 +200,9 @@ class MonitoringLoop:
             )
             recent = self._recent.setdefault(name, deque(maxlen=RECENT_PER_APP))
             recent.extend(collected.observations)
+            self._checks[name] = self._checks.get(name, 0) + 1
+            seen = self._seen.setdefault(name, set())
+            seen.update((o.kind, o.name) for o in collected.observations)
 
             try:
                 new = self._detector.evaluate(collected.observations)
@@ -206,12 +220,19 @@ class MonitoringLoop:
             store = self._store
             self._guard(errors, "pruning old observations", lambda: store.prune(self._clock()))
         self._guard(errors, "applying decisions", lambda: self._apply_decisions(errors))
+        warnings = self._unreported()
         expired = self._expire(errors)
         if self._store is not None:
             self._guard(errors, "recording the heartbeat", self._store_beat)
         self.stats.errors += len(errors)
         report = TickReport(
-            self.stats.ticks, observed, tuple(detected), tuple(results), tuple(expired), tuple(errors)
+            self.stats.ticks,
+            observed,
+            tuple(detected),
+            tuple(results),
+            tuple(expired),
+            tuple(errors),
+            tuple(warnings),
         )
         if self._on_tick is not None:
             try:
@@ -245,6 +266,50 @@ class MonitoringLoop:
         self._detector.release(incident_id)
         if result is not None:
             self._remember(result.incident, ACKNOWLEDGED, result.reason)
+
+    # ----- configuration that never matches -----
+
+    _PROVIDERS = (
+        (ObservationKind.HEALTH, HealthProvider),
+        (ObservationKind.METRIC, MetricsProvider),
+        (ObservationKind.DRIFT, DriftProvider),
+    )
+
+    def _unreported(self) -> list[str]:
+        """Warn once when the config watches something an application never reports.
+
+        Otherwise a typo in a metric name would silently switch that check off.
+        """
+        watched = getattr(self._detector, "watched", None)
+        if self._warn_after == 0 or watched is None:
+            return []
+        providers = dict(self._PROVIDERS)
+        found: list[str] = []
+        for app, checks in self._checks.items():
+            if checks < self._warn_after:
+                continue
+            capabilities = self._registry.get(app).capabilities
+            seen = self._seen.get(app, set())
+            for kind, wanted in sorted(watched(), key=lambda w: (w[0].value, w[1] or "")):
+                key = (app, kind, wanted)
+                if key in self._warned:
+                    continue
+                reported = (
+                    any(k is kind for k, _ in seen) if wanted is None else (kind, wanted) in seen
+                )
+                if reported:
+                    continue
+                self._warned.add(key)
+                label = f"{kind.value} {wanted!r}" if wanted else f"any {kind.value} reading"
+                if not capabilities.has(providers[kind]):
+                    why = f"does not provide {kind.value} readings at all"
+                else:
+                    why = f"has not reported it in {checks} checks (check the name and the adapter)"
+                found.append(f"{app}: the configuration watches {label}, but the application {why}")
+        for message in found:
+            log.warning(message)
+        self.stats.warnings += len(found)
+        return found
 
     # ----- answers from the command line -----
 

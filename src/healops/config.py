@@ -209,6 +209,8 @@ class HealOpsConfig(_StrictModel):
     audit_log_path: str | None = "healops_audit.jsonl"
     state_db_path: str | None = "healops_state.db"
     state_retention_days: int = Field(default=30, ge=1, le=3650)
+    max_recovery_attempts: int = Field(default=3, ge=1, le=10)
+    warn_unreported_after_checks: int = Field(default=5, ge=0, le=100000)
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     metric_degradation: dict[str, MetricBaseline] = Field(default_factory=dict)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)

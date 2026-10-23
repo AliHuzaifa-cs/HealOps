@@ -19,6 +19,14 @@ audit_log_path: healops_audit.jsonl
 state_db_path: healops_state.db
 state_retention_days: 30
 
+# How many recovery actions HealOps may try for one incident before a person takes over.
+max_recovery_attempts: 3
+
+# After this many checks, warn once about anything the config watches that the application
+# never reported (a typo in a metric name would otherwise silently disable that check).
+# 0 switches the warning off.
+warn_unreported_after_checks: 5
+
 # Time limits for calls into your application's adapter. A call that takes longer is
 # treated as failed; an action that times out is escalated to a person, never retried.
 # After max_stuck_calls hung calls, the application is treated as unresponsive.

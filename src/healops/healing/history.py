@@ -1,7 +1,7 @@
 """A record of recovery actions that were really executed (used for retry limits and cooldowns)."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from healops.events import _require_aware, _require_text
 from healops.types import ActionType
@@ -27,11 +27,19 @@ class ActionRecord:
 class ActionHistory:
     """In-memory history. The orchestrator records an action when it starts running it.
 
-    It keeps every record for now (no pruning), which is fine for a short-lived demo
-    but would need a size or age limit for a long-running service.
+    A long-running service must not grow without limit, so old records go: those older
+    than `retention` (measured from the newest record) and, beyond `max_records`, the
+    oldest. Pick `retention` at least as long as your longest cooldown and approval
+    window, or a cooldown could be forgotten early. Without limits it keeps everything.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, retention: timedelta | None = None, max_records: int | None = None) -> None:
+        if retention is not None and retention <= timedelta(0):
+            raise ValueError("retention must be positive")
+        if max_records is not None and max_records < 1:
+            raise ValueError("max_records must be at least 1")
+        self._retention = retention
+        self._max_records = max_records
         self._records: list[ActionRecord] = []
 
     def record(
@@ -43,7 +51,15 @@ class ActionHistory:
     ) -> ActionRecord:
         entry = ActionRecord(app_name, incident_id, action_type, executed_at)
         self._records.append(entry)
+        self._prune(executed_at)
         return entry
+
+    def _prune(self, now: datetime) -> None:
+        if self._retention is not None:
+            cutoff = now - self._retention
+            self._records = [r for r in self._records if r.executed_at >= cutoff]
+        if self._max_records is not None and len(self._records) > self._max_records:
+            self._records = self._records[-self._max_records :]
 
     def attempts(self, incident_id: str, action_type: ActionType) -> int:
         """How many times `action_type` was run for this incident."""

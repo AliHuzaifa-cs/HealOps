@@ -10,7 +10,7 @@ the policy engine's permission, and every step goes to the audit log.
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from healops.agents.base import DiagnosisAgent
@@ -88,12 +88,13 @@ class HealOps:
         orchestrator = Orchestrator(
             registry=self._registry,
             agent=self._agent,
-            policy=PolicyEngine(config, history=ActionHistory(), clock=clock),
+            policy=PolicyEngine(config, history=_new_history(config), clock=clock),
             approvals=self._approvals,
             notifier=SafeNotifier(
                 self._notifiers(notifiers, environ, smtp_factory, clock)
             ),
             dry_run=config.dry_run,
+            max_recovery_attempts=config.max_recovery_attempts,
             clock=clock,
             verifier=verifier_,
             on_resolved=self._detector.release,
@@ -107,6 +108,7 @@ class HealOps:
             on_tick=on_tick,
             store=self._store,
             clock=clock,
+            warn_after_checks=config.warn_unreported_after_checks,
         )
         self.restored: RestoreReport = self._loop.restore()
         if config.dry_run:
@@ -232,6 +234,20 @@ def _default_audit(config: HealOpsConfig) -> AuditLog:
     if config.audit_log_path is None:
         return MemoryAuditLog()
     return JsonlAuditLog(config.audit_log_path)
+
+
+HISTORY_MARGIN = timedelta(hours=1)
+HISTORY_MIN_RETENTION = timedelta(days=1)
+HISTORY_MAX_RECORDS = 10_000
+
+
+def _new_history(config: HealOpsConfig) -> ActionHistory:
+    """Remember actions long enough for every cooldown and approval window, but not forever."""
+    cooldowns = [config.default_policy.cooldown_seconds]
+    cooldowns += [policy.cooldown_seconds for policy in config.policies.values()]
+    longest = max(max(cooldowns), config.approval_timeout_seconds)
+    retention = max(timedelta(seconds=longest) + HISTORY_MARGIN, HISTORY_MIN_RETENTION)
+    return ActionHistory(retention=retention, max_records=HISTORY_MAX_RECORDS)
 
 
 def _default_store(config: HealOpsConfig) -> StateStore:

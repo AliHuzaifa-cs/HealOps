@@ -45,7 +45,7 @@ dev = ["pytest>=8", "ruff", "build", "twine"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-healops = ["py.typed"]
+healops = ["py.typed", "dashboard/static/*", "dashboard/static/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

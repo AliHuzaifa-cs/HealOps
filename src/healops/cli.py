@@ -217,6 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "reject":
             p.add_argument("--reason", help="why (optional)")
         common(p)
+
+    from healops.dashboard.cli import add_parsers
+
+    add_parsers(sub)
     return parser
 
 
@@ -228,6 +232,10 @@ def main(
 ) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command in ("dashboard", "demo"):
+            from healops.dashboard.cli import run_dashboard, run_demo
+
+            return (run_dashboard if args.command == "dashboard" else run_demo)(args, out)
         if args.command == "list":
             return cmd_list(args, out, now())
         if args.timeout <= 0:

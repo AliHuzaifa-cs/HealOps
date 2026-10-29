@@ -13,3 +13,6 @@ show_tree.py
 
 dist/
 build/
+node_modules/
+dashboard-ui/dist/
+healops_demo/

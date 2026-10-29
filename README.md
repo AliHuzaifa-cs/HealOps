@@ -152,8 +152,10 @@ applied. (`python -m healops ...` does the same.)
 HealOps is the final-year project "Agentic Self-Healing MLOps".
 
 - Ali Huzaifa (maintainer)
-- _add the other team members here_
-- Supervisor: _add name here_
+- Muhammad Rafeh
+- Sufyan Khan
+- Maaz Tariq Soomro
+- Supervisor: Sir Abdullah Bin Tahir
 
 Thanks to everyone whose feedback shaped the design.
 

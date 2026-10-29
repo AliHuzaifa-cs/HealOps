@@ -10,7 +10,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Ali Huzaifa" }]
+authors = [
+  { name = "Ali Huzaifa" },
+  { name = "Muhammad Rafeh" },
+  { name = "Sufyan Khan" },
+  { name = "Maaz Tariq Soomro" },
+]
 keywords = ["mlops", "self-healing", "monitoring", "llm", "agents", "machine-learning", "reliability"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,10 +31,9 @@ classifiers = [
 ]
 dependencies = ["pydantic>=2.7", "pyyaml>=6"]
 
-# Add these once the repository is public:
-# [project.urls]
-# Homepage = "https://github.com/AliHuzaifa-cs/HealOps"
-# Issues = "https://github.com/AliHuzaifa-cs/HealOps/issues"
+[project.urls]
+Homepage = "https://github.com/AliHuzaifa-cs/HealOps"
+Issues = "https://github.com/AliHuzaifa-cs/HealOps/issues"
 
 [project.scripts]
 healops = "healops.cli:run"

@@ -56,22 +56,37 @@ class ThresholdRule:
 
 
 class ThresholdDetector:
-    """Creates an incident when a rule is breached several checks in a row."""
+    """Creates an incident when a rule is breached several checks in a row.
+
+    Breaches are counted per signal (application, incident type, observation name), but one
+    underlying problem is one incident: all signals of the same application and incident type are
+    grouped. When several of them cross the limit (for example the PSI and the KS distance of the
+    same input, which move together), a single incident carries all of them as evidence. While that
+    incident is open, further signals of the same group do not open another one.
+    """
 
     def __init__(self, rules: Sequence[ThresholdRule], consecutive_breaches: int) -> None:
         self._rules = tuple(rules)
         self._required = consecutive_breaches
         self._tracker = BreachTracker(consecutive_breaches)
         self._runs: dict[str, list[Observation]] = {}
-        self._open: dict[str, str] = {}
+        self._open: dict[str, str] = {}  # incident id -> group key
+        self._open_groups: set[str] = set()
+        self._signals: dict[str, set[str]] = {}  # group key -> signal keys seen
+
+    @staticmethod
+    def _group(app_name: str, rule: ThresholdRule) -> str:
+        return f"{app_name}|{rule.incident_type.value}"
 
     def evaluate(self, observations: Sequence[Observation]) -> list[Incident]:
-        incidents: list[Incident] = []
+        fired: dict[str, tuple[ThresholdRule, Observation]] = {}
         for observation in observations:
             for rule in self._rules:
                 if not rule.matches(observation):
                     continue
-                key = f"{observation.app_name}|{rule.incident_type.value}|{observation.name}"
+                group = self._group(observation.app_name, rule)
+                key = f"{group}|{observation.name}"
+                self._signals.setdefault(group, set()).add(key)
                 breached = rule.is_breached(observation)
                 run = self._runs.setdefault(key, [])
                 if breached:
@@ -80,16 +95,29 @@ class ThresholdDetector:
                         del run[: len(run) - self._required]
                 else:
                     run.clear()
-                if self._tracker.record(key, breached):
-                    incident = Incident(
-                        app_name=observation.app_name,
-                        incident_type=rule.incident_type,
-                        severity=rule.severity,
-                        summary=self._summary(rule, observation),
-                        evidence=tuple(run),
-                    )
-                    self._open[incident.incident_id] = key
-                    incidents.append(incident)
+                if self._tracker.record(key, breached) and group not in fired:
+                    fired[group] = (rule, observation)
+
+        incidents: list[Incident] = []
+        for group, (rule, observation) in fired.items():
+            if group in self._open_groups:
+                continue  # the same problem is already being handled
+            evidence: list[Observation] = []
+            names: list[str] = []
+            for key in sorted(self._signals[group]):
+                if self._tracker.count(key) >= self._required and self._runs.get(key):
+                    evidence.extend(self._runs[key])
+                    names.append(key.rsplit("|", 1)[1])
+            incident = Incident(
+                app_name=observation.app_name,
+                incident_type=rule.incident_type,
+                severity=rule.severity,
+                summary=self._summary(rule, observation, names),
+                evidence=tuple(evidence),
+            )
+            self._open[incident.incident_id] = group
+            self._open_groups.add(group)
+            incidents.append(incident)
         return incidents
 
     def watched(self) -> frozenset[tuple[ObservationKind, str | None]]:
@@ -98,31 +126,36 @@ class ThresholdDetector:
 
     def hold(self, incident: Incident) -> None:
         """Remember that `incident` is still open (after a restart), so it is not raised twice."""
-        name = incident.evidence[0].name
         for rule in self._rules:
             if rule.incident_type is not incident.incident_type:
                 continue
-            if rule.observation_name is not None and rule.observation_name != name:
-                continue
-            key = f"{incident.app_name}|{rule.incident_type.value}|{name}"
-            self._open[incident.incident_id] = key
-            self._tracker.hold(key)
+            group = self._group(incident.app_name, rule)
+            self._open[incident.incident_id] = group
+            self._open_groups.add(group)
+            for name in {o.name for o in incident.evidence}:
+                key = f"{group}|{name}"
+                self._signals.setdefault(group, set()).add(key)
+                self._tracker.hold(key)
             return
 
     def release(self, incident_id: str) -> None:
         """Call when an incident is closed, so the same problem can be detected again."""
-        key = self._open.pop(incident_id, None)
-        if key is not None:
+        group = self._open.pop(incident_id, None)
+        if group is None:
+            return
+        self._open_groups.discard(group)
+        for key in self._signals.get(group, ()):
             self._tracker.reset(key)
             self._runs.pop(key, None)
 
-    def _summary(self, rule: ThresholdRule, observation: Observation) -> str:
+    def _summary(self, rule: ThresholdRule, observation: Observation, names: list[str]) -> str:
         if rule.limit is None:
             return f"{observation.name} check failed {self._required} times in a row"
         side = "below" if rule.below else "above"
+        extra = f" (also {', '.join(n for n in names if n != observation.name)})" if len(names) > 1 else ""
         return (
             f"{observation.name} was {side} {rule.limit:g} for {self._required} "
-            f"checks in a row (latest {float(observation.value):g})"
+            f"checks in a row (latest {float(observation.value):g}){extra}"
         )
 
 

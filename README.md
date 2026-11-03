@@ -7,7 +7,7 @@ bad model, drifting data), asks a diagnosis agent what to do, checks the proposa
 strict policies, carries it out only if allowed, and verifies that the application really
 recovered. People are asked whenever the policy says so.
 
-> **Status: alpha (0.1.0).** The core loop is built and tested, but it has been exercised
+> **Status: alpha (0.1.1).** The core loop is built and tested, but it has been exercised
 > on a toy application, not yet on production systems. Read
 > [docs/safety-and-limits.md](docs/safety-and-limits.md) before trusting it with anything
 > that matters.

@@ -7,7 +7,7 @@ bad model, drifting data), asks a diagnosis agent what to do, checks the proposa
 strict policies, carries it out only if allowed, and verifies that the application really
 recovered. People are asked whenever the policy says so.
 
-> **Status: alpha (0.1.1).** The core loop is built and tested, but it has been exercised
+> **Status: alpha (0.2.0).** The core loop is built and tested, but it has been exercised
 > on a toy application, not yet on production systems. Read
 > [docs/safety-and-limits.md](docs/safety-and-limits.md) before trusting it with anything
 > that matters.
@@ -158,6 +158,20 @@ HealOps is the final-year project "Agentic Self-Healing MLOps".
 - Supervisor: Sir Abdullah Bin Tahir
 
 Thanks to everyone whose feedback shaped the design.
+
+## Dashboard
+
+HealOps ships with a small web dashboard for the people who run the application: the state of the
+monitor, incidents, approvals that are waiting, and the audit log. It needs no extra packages.
+
+```
+healops demo                                   # sample data, to look around
+healops dashboard --db state.db --by "Your Name" --open
+```
+
+It listens on this computer only by default (`--host 127.0.0.1`). An approval answered in the
+dashboard is written to the same state file as `healops approve`, and the running monitor
+applies it on its next check.
 
 ## License
 

@@ -191,6 +191,12 @@ class DashboardApp:
                 },
                 text.encode("utf-8"),
             )
+        if path == "/api/signals":
+            return _json(200, {"shell": views.shell(snap), **views.signals_page(snap, query.get("range"))})
+        if path == "/api/apps":
+            return _json(200, {"shell": views.shell(snap), **views.apps_page(snap)})
+        if path == "/api/agent":
+            return _json(200, {"shell": views.shell(snap), **views.agent_page(snap, query.get("q"))})
         if path.startswith("/api/incidents/"):
             incident_id = path[len("/api/incidents/") :]
             detail = views.incident_detail(snap, incident_id)

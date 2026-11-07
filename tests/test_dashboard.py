@@ -414,3 +414,92 @@ def test_recovered_incidents_are_labelled_and_not_counted_as_healed(tmp_path):
     assert state_label(snap, again) == ("Recovered", "idle")
     assert handled_by(snap, again) == "self"
     app.close()
+
+
+# ---------- drift/signals, applications and agent pages ----------
+
+
+def test_signals_page_has_one_series_per_signal(demo):
+    app, _ = demo
+    status, page = get(app, "/api/signals?range=7d")
+    assert status == 200
+    assert page["range"] == "7d"
+    assert page["drift"], "the demo has drift readings"
+    for item in page["drift"] + page["service"]:
+        assert item["points"] and len(item["points"]) <= views.SIGNAL_POINTS
+        assert item["min"] <= item["latest"] <= item["max"]
+        assert item["readings"] >= 1
+    assert all(i["kind"] == "drift" for i in page["drift"])
+    assert all(i["kind"] != "drift" for i in page["service"])
+    assert page["drift"][0]["threshold"] == 0.25
+
+
+def test_downsampling_keeps_the_worst_reading():
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    points = [(start + timedelta(minutes=i), 1.0) for i in range(1000)]
+    points[500] = (points[500][0], 9.0)
+    spiky = views._downsample(points, 50, worst_low=False)
+    assert len(spiky) == 50 and max(p["value"] for p in spiky) == 9.0
+    points = [(start + timedelta(minutes=i), 1.0) for i in range(1000)]
+    points[300] = (points[300][0], 0.0)
+    dips = views._downsample(points, 50, worst_low=True)
+    assert min(p["value"] for p in dips) == 0.0
+
+
+def test_apps_page_counts_incidents_by_who_closed_them(demo):
+    app, _ = demo
+    status, page = get(app, "/api/apps")
+    assert status == 200 and page["apps"]
+    _, incidents = get(app, "/api/incidents?range=30d")
+    for row in page["apps"]:
+        mine = [r for r in incidents["rows"] if r["app"] == row["app"]]
+        assert row["incidents"]["total"] == len(mine)
+        parts = row["incidents"]
+        assert parts["open"] + parts["by_agent"] + parts["by_human"] + parts["by_self"] <= parts["total"]
+        assert row["status"] in {"Healthy", "Healing", "Drifting", "Degraded"}
+
+
+def test_agent_page_lists_setup_policies_and_searchable_audit(tmp_path):
+    db, audit = build_demo(tmp_path / "a", now=NOW)
+    settings = views.Settings(
+        demo=True,
+        agent={"mode": "Dry run", "recovery_checks": 3},
+        policies=[{"action": "restart_component", "verdict": "allow", "max_retries": 1, "cooldown_seconds": 300}],
+    )
+    app = DashboardApp(db, audit, settings, clock=lambda: NOW)
+    status, page = get(app, "/api/agent")
+    assert status == 200
+    assert page["setup"]["mode"] == "Dry run"
+    assert page["policies"][0]["action"] == "restart_component"
+    assert page["total"] >= len(page["events"]) > 0
+    times = [e["at"] for e in page["events"]]
+    assert times == sorted(times, reverse=True)
+
+    _, none = get(app, "/api/agent?q=zzz-no-such-text")
+    assert none["events"] == [] and none["matched"] == 0 and none["total"] == page["total"]
+    first = page["events"][0]
+    _, some = get(app, "/api/agent?q=" + first["incident"])
+    assert some["matched"] >= 1 and all(first["incident"].lower() in (e["incident"] + e["text"] + e["app"] + e["stage"]).lower() for e in some["events"])
+    app.close()
+
+
+def test_agent_page_needs_no_config(demo):
+    app, _ = demo
+    _, page = get(app, "/api/agent")
+    assert page["setup"] == {} and page["policies"] == []
+
+
+def test_dashboard_cli_reads_agent_setup_from_the_config(tmp_path):
+    from healops.dashboard.cli import _settings
+    from healops.loader import load_config
+    import argparse
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("dry_run: true\nrecovery_checks: 4\npolicies:\n  restart_component:\n    verdict: allow\n", encoding="utf-8")
+    args = argparse.Namespace(name="X", env="local", by="ali", allow_actions=False)
+    settings = _settings(args, load_config(cfg), False)
+    assert settings.agent["mode"] == "Dry run" and settings.agent["recovery_checks"] == 4
+    assert settings.agent["diagnosis"] == "rules only"
+    actions = [p["action"] for p in settings.policies]
+    assert actions[0] == "any other action" and "restart_component" in actions
+    assert "api_key" not in str(settings.agent)

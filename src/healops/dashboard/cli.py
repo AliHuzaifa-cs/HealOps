@@ -86,6 +86,33 @@ def _settings(args: argparse.Namespace, config: HealOpsConfig | None, demo: bool
             if value is not None:
                 settings.metric_thresholds[name] = value
         settings.metric_baselines = {name: m.baseline for name, m in config.metric_degradation.items()}
+        settings.agent = {
+            "mode": "Dry run" if config.dry_run else "Live",
+            "diagnosis": f"{config.llm.provider} / {config.llm.model}" if config.llm else "rules only",
+            "check_interval_seconds": config.check_interval_seconds,
+            "consecutive_breaches": config.thresholds.consecutive_breaches,
+            "min_confidence_for_auto": config.min_confidence_for_auto,
+            "max_recovery_attempts": config.max_recovery_attempts,
+            "recovery_checks": config.recovery_checks,
+            "approval_timeout_seconds": config.approval_timeout_seconds,
+            "email_alerts": config.email is not None,
+        }
+        settings.policies = [
+            {
+                "action": "any other action",
+                "verdict": config.default_policy.verdict.value,
+                "max_retries": config.default_policy.max_retries,
+                "cooldown_seconds": config.default_policy.cooldown_seconds,
+            }
+        ] + [
+            {
+                "action": action.value,
+                "verdict": policy.verdict.value,
+                "max_retries": policy.max_retries,
+                "cooldown_seconds": policy.cooldown_seconds,
+            }
+            for action, policy in sorted(config.policies.items(), key=lambda kv: kv[0].value)
+        ]
     return settings
 
 

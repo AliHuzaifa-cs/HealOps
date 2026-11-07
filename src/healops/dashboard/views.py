@@ -116,6 +116,8 @@ class Settings:
     drift_threshold: float | None = None
     metric_thresholds: dict[str, float] = field(default_factory=dict)
     metric_baselines: dict[str, float] = field(default_factory=dict)
+    agent: dict[str, Any] = field(default_factory=dict)  # how the agent is set up
+    policies: list[dict[str, Any]] = field(default_factory=list)  # one row per action kind
     demo: bool = False
 
 
@@ -841,4 +843,151 @@ def incident_detail(snap: Snapshot, incident_id: str) -> dict[str, Any] | None:
         "checks": checks,
         "alternatives": alternatives,
         "reason": stored.reason,
+    }
+
+
+# ---------- drift and service signals ----------
+
+SIGNAL_POINTS = 120
+_KIND_ORDER = {"drift": 0, "health": 1, "metric": 2}
+
+
+def _downsample(points: list[tuple[datetime, float]], count: int, worst_low: bool) -> list[dict]:
+    """At most `count` points; each keeps the worst reading of its slice, so a spike survives."""
+    if len(points) <= count:
+        return [{"at": _iso(t), "value": round(v, 6)} for t, v in points]
+    size = len(points) / count
+    out = []
+    for i in range(count):
+        chunk = points[int(i * size) : int((i + 1) * size)] or [points[-1]]
+        pick = (min if worst_low else max)(chunk, key=lambda p: p[1])
+        out.append({"at": _iso(chunk[-1][0]), "value": round(pick[1], 6)})
+    return out
+
+
+def signals_page(snap: Snapshot, range_name: str | None = None) -> dict[str, Any]:
+    """Every stored reading in the period, one series per (application, signal)."""
+    key, window = _window(range_name)
+    start = snap.now - window
+    series: dict[tuple[str, str, str], list[tuple[datetime, float]]] = {}
+    for o in snap.observations:
+        if o.timestamp < start:
+            continue
+        value = _num(o.value)
+        if value is None:
+            continue
+        series.setdefault((o.app_name, o.kind.value, o.name), []).append((o.timestamp, value))
+
+    items = []
+    for (app, kind, name), points in series.items():
+        points.sort(key=lambda p: p[0])
+        values = [v for _, v in points]
+        if kind == "drift":
+            threshold = snap.settings.drift_threshold
+        elif kind == "metric":
+            threshold = snap.settings.metric_thresholds.get(name)
+        else:
+            threshold = None
+        if kind == "health":
+            breaches = sum(1 for v in values if v < 1)
+        elif threshold is not None:
+            breaches = sum(1 for v in values if v > threshold)
+        else:
+            breaches = 0
+        items.append(
+            {
+                "app": app,
+                "kind": kind,
+                "name": name,
+                "label": humanize(name),
+                "latest": values[-1],
+                "latest_at": _iso(points[-1][0]),
+                "min": min(values),
+                "max": max(values),
+                "avg": sum(values) / len(values),
+                "readings": len(values),
+                "threshold": threshold,
+                "breaches": breaches,
+                "points": _downsample(points, SIGNAL_POINTS, worst_low=(kind == "health")),
+            }
+        )
+    items.sort(key=lambda i: (i["app"], _KIND_ORDER.get(i["kind"], 9), i["name"]))
+    return {
+        "range": key,
+        "drift": [i for i in items if i["kind"] == "drift"],
+        "service": [i for i in items if i["kind"] != "drift"],
+    }
+
+
+# ---------- the applications HealOps watches ----------
+
+
+def apps_page(snap: Snapshot) -> dict[str, Any]:
+    day_ago = snap.now - timedelta(hours=24)
+    latest_drift = _latest_drift(snap)
+    rows = []
+    for app in _apps(snap):
+        mine = [s for s in snap.incidents if s.incident.app_name == app]
+        seen = [o for o in snap.observations if o.app_name == app]
+        closed = [s for s in mine if s.status in CLOSED]
+        rows.append(
+            {
+                "app": app,
+                "status": _app_status(snap, app),
+                "last_seen": _iso(max((o.timestamp for o in seen), default=None)),
+                "readings_24h": sum(1 for o in seen if o.timestamp >= day_ago),
+                "signals": sorted({o.name for o in seen}),
+                "drift": None if app not in latest_drift else round(latest_drift[app], 3),
+                "incidents": {
+                    "total": len(mine),
+                    "open": sum(1 for s in mine if s.status in ACTIVE),
+                    "by_agent": sum(1 for s in closed if handled_by(snap, s) == "agent"),
+                    "by_human": sum(1 for s in closed if handled_by(snap, s) == "human"),
+                    "by_self": sum(1 for s in closed if handled_by(snap, s) == "self"),
+                },
+            }
+        )
+    return {
+        "apps": rows,
+        "limits": {
+            "drift": snap.settings.drift_threshold,
+            "metrics": dict(snap.settings.metric_thresholds),
+        },
+    }
+
+
+# ---------- the agent: how it is set up, and everything it did ----------
+
+
+def agent_page(snap: Snapshot, query: str | None = None, limit: int = 100) -> dict[str, Any]:
+    needle = (query or "").strip().lower()[:100]
+    events = sorted(snap.all_events, key=lambda e: e.created_at, reverse=True)
+    rows = []
+    matched = 0
+    for event in events:
+        text = describe_event(event)
+        haystack = " ".join(
+            [text, event.app_name, event.stage.value, short_id(event.incident_id)]
+        ).lower()
+        if needle and needle not in haystack:
+            continue
+        matched += 1
+        if len(rows) < limit:
+            rows.append(
+                {
+                    "at": _iso(event.created_at),
+                    "stage": humanize(event.stage.value),
+                    "app": event.app_name,
+                    "incident": short_id(event.incident_id),
+                    "incident_id": event.incident_id,
+                    "text": text,
+                }
+            )
+    return {
+        "setup": dict(snap.settings.agent),
+        "policies": list(snap.settings.policies),
+        "events": rows,
+        "matched": matched,
+        "total": len(events),
+        "query": needle,
     }

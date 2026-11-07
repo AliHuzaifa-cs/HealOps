@@ -87,3 +87,58 @@ export interface Detail {
   alternatives: string[];
   reason: string | null;
 }
+
+export interface SignalItem {
+  app: string;
+  kind: string;
+  name: string;
+  label: string;
+  latest: number;
+  latest_at: string;
+  min: number;
+  max: number;
+  avg: number;
+  readings: number;
+  threshold: number | null;
+  breaches: number;
+  points: { at: string; value: number }[];
+}
+export interface SignalsPage {
+  shell: Shell;
+  range: string;
+  drift: SignalItem[];
+  service: SignalItem[];
+}
+
+export interface AppRow {
+  app: string;
+  status: string;
+  last_seen: string | null;
+  readings_24h: number;
+  signals: string[];
+  drift: number | null;
+  incidents: { total: number; open: number; by_agent: number; by_human: number; by_self: number };
+}
+export interface AppsPage {
+  shell: Shell;
+  apps: AppRow[];
+  limits: { drift: number | null; metrics: Record<string, number> };
+}
+
+export interface AgentEvent {
+  at: string;
+  stage: string;
+  app: string;
+  incident: string;
+  incident_id: string;
+  text: string;
+}
+export interface AgentPageData {
+  shell: Shell;
+  setup: Record<string, string | number | boolean>;
+  policies: { action: string; verdict: string; max_retries: number; cooldown_seconds: number }[];
+  events: AgentEvent[];
+  matched: number;
+  total: number;
+  query: string;
+}

@@ -133,3 +133,55 @@ export function EvidenceChart({
     </svg>
   );
 }
+
+/** A small line chart for one signal over time. `health` signals are drawn between 0 and 1. */
+export function SignalChart({
+  points,
+  threshold,
+  health,
+  label,
+}: {
+  points: { at: string; value: number }[];
+  threshold: number | null;
+  health?: boolean;
+  label: string;
+}) {
+  if (points.length < 2) {
+    return <div className="empty">Not enough readings yet to draw {label}.</div>;
+  }
+  const W = 640;
+  const H = 150;
+  const t0 = Date.parse(points[0].at);
+  const span = Math.max(1, Date.parse(points[points.length - 1].at) - t0);
+  const vals = points.map((p) => p.value);
+  let lo = health ? 0 : Math.min(...vals, ...(threshold !== null ? [threshold] : []));
+  let hi = health ? 1 : Math.max(...vals, ...(threshold !== null ? [threshold] : []));
+  if (hi === lo) {
+    hi += 1;
+    lo -= health ? 0 : 1;
+  }
+  const pad = health ? 0 : (hi - lo) * 0.15;
+  lo -= pad;
+  hi += pad;
+  const x = (t: number) => ((t - t0) / span) * W;
+  const y = (v: number) => 118 - ((v - lo) / (hi - lo)) * 100;
+  const line = points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${x(Date.parse(p.at)).toFixed(1)} ${y(p.value).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={`${label} over time`} style={{ marginTop: 12, height: "auto", display: "block" }}>
+      {[30, 70, 110].map((gy) => (
+        <line key={gy} x1="0" y1={gy} x2={W} y2={gy} stroke="#1f2733" />
+      ))}
+      {threshold !== null && (
+        <g>
+          <line x1="0" y1={y(threshold)} x2={W} y2={y(threshold)} stroke="#ff6b6b" strokeDasharray="6 6" />
+          <text x="8" y={y(threshold) - 6} fill="#ff8f8f" fontSize="11" fontFamily="JetBrains Mono">alert limit</text>
+        </g>
+      )}
+      <path d={line} fill="none" stroke="#9b8cff" strokeWidth="2.2" strokeLinejoin="round" />
+      <text x="0" y="144" fill="#8b97a9" fontSize="11" fontFamily="JetBrains Mono">{clock(points[0].at)}</text>
+      <text x={W} y="144" textAnchor="end" fill="#8b97a9" fontSize="11" fontFamily="JetBrains Mono">{clock(points[points.length - 1].at)}</text>
+    </svg>
+  );
+}

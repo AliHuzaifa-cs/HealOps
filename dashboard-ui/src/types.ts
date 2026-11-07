@@ -23,7 +23,7 @@ export interface IncidentRow {
   status: string;
   state: string;
   state_tone: Tone;
-  by: "agent" | "human" | "pending";
+  by: "agent" | "human" | "self" | "pending";
   detected_at: string;
   updated_at: string;
   closed_at: string | null;
@@ -50,7 +50,7 @@ export interface Overview {
 export interface IncidentsPage {
   shell: Shell;
   range: string;
-  counts: { open: number; awaiting: number; by_agent: number; by_human: number };
+  counts: { open: number; awaiting: number; by_agent: number; by_human: number; by_self: number };
   rows: IncidentRow[];
   causes: { label: string; n: number; w: number }[];
   note: string | null;
@@ -59,6 +59,7 @@ export interface IncidentsPage {
 export interface Detail {
   shell: Shell;
   incident: IncidentRow;
+  can_resolve: boolean;
   steps: { name: string; state: "done" | "current" | "todo"; sub: string; at: string | null }[];
   series: {
     name: string;

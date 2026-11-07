@@ -61,7 +61,7 @@ function Confirm({
 
 export function IncidentDetail({ id }: { id: string }) {
   const { data, error, reload } = useApi<Detail>(`/api/incidents/${encodeURIComponent(id)}`);
-  const [asking, setAsking] = useState<"approve" | "reject" | null>(null);
+  const [asking, setAsking] = useState<"approve" | "reject" | "acknowledge" | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; bad: boolean } | null>(null);
   const shell = data?.shell ?? null;
@@ -72,7 +72,7 @@ export function IncidentDetail({ id }: { id: string }) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  async function answer(action: "approve" | "reject", reason: string) {
+  async function answer(action: "approve" | "reject" | "acknowledge", reason: string) {
     setBusy(true);
     try {
       const result = await decide(id, action, reason);
@@ -100,6 +100,7 @@ export function IncidentDetail({ id }: { id: string }) {
   const inc = data?.incident;
   const action = data?.action;
   const canAnswer = !!action?.can_decide;
+  const canResolve = !!data?.can_resolve;
   const enabled = !!shell?.actions_enabled;
   const off = !enabled ? "Start the dashboard with --allow-actions to answer from here" : undefined;
   const now = shell?.now ?? new Date().toISOString();
@@ -124,6 +125,11 @@ export function IncidentDetail({ id }: { id: string }) {
                   {shell?.demo && <span className="tag" style={{ color: "var(--warn)", borderColor: "#5a4417" }}>SAMPLE DATA</span>}
                 </div>
               </div>
+              {canResolve && !canAnswer && (
+                <div className="hdr-btns">
+                  <button className="btn primary" disabled={!enabled} title={off} onClick={() => setAsking("acknowledge")}>Mark resolved</button>
+                </div>
+              )}
               {canAnswer && (
                 <div className="hdr-btns">
                   <button className="btn ghost" disabled={!enabled} title={off} onClick={() => setAsking("reject")}>Reject plan</button>
@@ -267,7 +273,18 @@ export function IncidentDetail({ id }: { id: string }) {
             </div>
           </section>
 
-          {asking && action && (
+          {asking === "acknowledge" && (
+            <Confirm
+              title="Mark this incident resolved?"
+              body={`Use this once you have dealt with it yourself. HealOps stops tracking it, and if the same problem comes back on ${inc.app} it opens a new incident.`}
+              confirmLabel="Mark resolved"
+              askReason
+              busy={busy}
+              onCancel={() => setAsking(null)}
+              onConfirm={(reason) => void answer("acknowledge", reason)}
+            />
+          )}
+          {(asking === "approve" || asking === "reject") && action && (
             <Confirm
               title={asking === "approve" ? "Approve and run?" : "Reject this plan?"}
               body={

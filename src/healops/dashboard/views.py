@@ -23,6 +23,7 @@ from healops.store import (
     AWAITING_APPROVAL,
     ESCALATED,
     IN_PROGRESS,
+    RECOVERED,
     RESOLVED,
     StateStore,
     StoredIncident,
@@ -37,7 +38,7 @@ RANGES: dict[str, timedelta] = {
 DEFAULT_RANGE = "24h"
 
 ACTIVE = frozenset({IN_PROGRESS, AWAITING_APPROVAL, ESCALATED})
-CLOSED = frozenset({RESOLVED, ACKNOWLEDGED})
+CLOSED = frozenset({RESOLVED, ACKNOWLEDGED, RECOVERED})
 
 HEARTBEAT_FRESH_SECONDS = 300
 MAX_INCIDENTS = 1000
@@ -185,7 +186,9 @@ def state_label(snap: Snapshot, stored: StoredIncident) -> tuple[str, str]:
     if status == RESOLVED:
         return "Resolved", "ok"
     if status == ACKNOWLEDGED:
-        return "Acknowledged", "info"
+        return "Closed by a person", "info"
+    if status == RECOVERED:
+        return "Recovered", "idle"
     stage = stage_of(snap, stored)
     tone = "heal" if stage >= 2 else "info"
     return _STATE_LABEL.get(stage, "In progress"), tone
@@ -203,11 +206,13 @@ def closed_at(snap: Snapshot, stored: StoredIncident) -> datetime | None:
 
 
 def handled_by(snap: Snapshot, stored: StoredIncident) -> str:
-    """'agent', 'human' or 'pending' (still open)."""
+    """'agent', 'human', 'self' (the problem went away on its own) or 'pending' (still open)."""
     if stored.status in ACTIVE:
         return "pending"
     if stored.status == ACKNOWLEDGED:
         return "human"
+    if stored.status == RECOVERED:
+        return "self"
     for event in snap.events_for(stored.incident.incident_id):
         if event.stage is AuditStage.APPROVAL_RESOLVED and event.payload.get("approved"):
             approver = str(event.payload.get("approver", ""))
@@ -543,6 +548,7 @@ def incidents_page(
         "awaiting": sum(1 for s in open_now if s.status == AWAITING_APPROVAL),
         "by_agent": sum(1 for s in resolved if handled_by(snap, s) == "agent"),
         "by_human": sum(1 for s in resolved if handled_by(snap, s) == "human"),
+        "by_self": sum(1 for s in resolved if handled_by(snap, s) == "self"),
     }
 
     causes = []
@@ -823,6 +829,7 @@ def incident_detail(snap: Snapshot, incident_id: str) -> dict[str, Any] | None:
     )
     return {
         "incident": row,
+        "can_resolve": stored.status == ESCALATED,
         "steps": _stepper(snap, stored, events),
         "series": _series(snap, stored),
         "evidence": [

@@ -39,6 +39,8 @@ from healops.interfaces import DriftProvider, HealthProvider, MetricsProvider
 from healops.registry import ApplicationRegistry
 from healops.store import (
     ACKNOWLEDGED,
+    ACKNOWLEDGE,
+    RECOVERED,
     APPLIED,
     APPROVE,
     AWAITING_APPROVAL,
@@ -106,6 +108,7 @@ class LoopStats:
     incidents: int = 0
     resolved: int = 0
     escalated: int = 0
+    recovered: int = 0
     parked: int = 0
     errors: int = 0
     decisions: int = 0
@@ -127,6 +130,7 @@ class MonitoringLoop:
         store: StateStore | None = None,
         clock: Callable[[], datetime] = _now,
         warn_after_checks: int = 5,
+        recovery_checks: int = 0,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -144,6 +148,9 @@ class MonitoringLoop:
         if warn_after_checks < 0:
             raise ValueError("warn_after_checks must not be negative")
         self._warn_after = warn_after_checks
+        if recovery_checks < 0:
+            raise ValueError("recovery_checks must not be negative")
+        self._recovery_checks = recovery_checks
         self._checks: dict[str, int] = {}
         self._seen: dict[str, set[tuple[ObservationKind, str]]] = {}
         self._warned: set[tuple[str, ObservationKind, str | None]] = set()
@@ -220,6 +227,7 @@ class MonitoringLoop:
             store = self._store
             self._guard(errors, "pruning old observations", lambda: store.prune(self._clock()))
         self._guard(errors, "applying decisions", lambda: self._apply_decisions(errors))
+        self._guard(errors, "closing recovered incidents", self._close_recovered)
         warnings = self._unreported()
         expired = self._expire(errors)
         if self._store is not None:
@@ -260,12 +268,40 @@ class MonitoringLoop:
         """A person refused a waiting action; the incident is escalated."""
         return self._settle(self._orchestrator.reject(incident_id, proposal_id, approver, reason))
 
-    def acknowledge(self, incident_id: str) -> None:
+    def acknowledge(
+        self, incident_id: str, by: str | None = None, reason: str | None = None
+    ) -> None:
         """A person dealt with an escalated incident; the same problem may be detected again."""
         result = self._open.pop(incident_id, None)
         self._detector.release(incident_id)
         if result is not None:
-            self._remember(result.incident, ACKNOWLEDGED, result.reason)
+            who = by or "a person"
+            note = f"closed by {who}" + (f": {reason}" if reason else "")
+            self._orchestrator.record_closed(result.incident, note)
+            self._remember(result.incident, ACKNOWLEDGED, note)
+
+    def _close_recovered(self) -> None:
+        """Close escalated incidents whose signals have been normal for long enough.
+
+        Only escalated ones: an incident waiting for approval is still a decision for a person,
+        and one being handled is closed by its own verification."""
+        is_clear = getattr(self._detector, "is_clear", None)
+        if self._recovery_checks < 1 or is_clear is None:
+            return
+        for incident_id, result in list(self._open.items()):
+            if result.status is not HandleStatus.ESCALATED:
+                continue
+            if not is_clear(incident_id, self._recovery_checks):
+                continue
+            self._open.pop(incident_id, None)
+            self._detector.release(incident_id)
+            note = (
+                f"recovered on its own: {self._recovery_checks} checks in a row were normal, "
+                "and HealOps did not fix it"
+            )
+            self._orchestrator.record_closed(result.incident, note)
+            self._remember(result.incident, RECOVERED, note)
+            self.stats.recovered += 1
 
     # ----- configuration that never matches -----
 
@@ -319,6 +355,13 @@ class MonitoringLoop:
             return
         for decision in self._store.waiting_decisions():
             try:
+                if decision.action == ACKNOWLEDGE:
+                    if decision.incident_id not in self._open:
+                        raise HealOpsError("that incident is not open any more")
+                    self.acknowledge(decision.incident_id, decision.approver, decision.reason)
+                    self._finish(decision.decision_id, APPLIED, "acknowledged")
+                    self.stats.decisions += 1
+                    continue
                 if decision.action == APPROVE:
                     result = self.approve(
                         decision.incident_id, decision.proposal_id, decision.approver

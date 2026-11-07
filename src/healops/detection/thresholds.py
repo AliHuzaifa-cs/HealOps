@@ -73,6 +73,7 @@ class ThresholdDetector:
         self._open: dict[str, str] = {}  # incident id -> group key
         self._open_groups: set[str] = set()
         self._signals: dict[str, set[str]] = {}  # group key -> signal keys seen
+        self._clear: dict[str, int] = {}  # signal key -> readings in a row that were normal
 
     @staticmethod
     def _group(app_name: str, rule: ThresholdRule) -> str:
@@ -88,6 +89,7 @@ class ThresholdDetector:
                 key = f"{group}|{observation.name}"
                 self._signals.setdefault(group, set()).add(key)
                 breached = rule.is_breached(observation)
+                self._clear[key] = 0 if breached else self._clear.get(key, 0) + 1
                 run = self._runs.setdefault(key, [])
                 if breached:
                     run.append(observation)
@@ -137,6 +139,15 @@ class ThresholdDetector:
                 self._signals.setdefault(group, set()).add(key)
                 self._tracker.hold(key)
             return
+
+    def is_clear(self, incident_id: str, checks: int) -> bool:
+        """True when every signal behind an open incident has been normal for `checks` readings
+        in a row. An incident this detector does not know is never clear."""
+        group = self._open.get(incident_id)
+        if group is None or checks < 1:
+            return False
+        keys = self._signals.get(group, ())
+        return bool(keys) and all(self._clear.get(k, 0) >= checks for k in keys)
 
     def release(self, incident_id: str) -> None:
         """Call when an incident is closed, so the same problem can be detected again."""

@@ -35,8 +35,11 @@ IN_PROGRESS = "in_progress"
 AWAITING_APPROVAL = "awaiting_approval"
 ESCALATED = "escalated"
 RESOLVED = "resolved"
-ACKNOWLEDGED = "acknowledged"
-STATUSES = frozenset({IN_PROGRESS, AWAITING_APPROVAL, ESCALATED, RESOLVED, ACKNOWLEDGED})
+ACKNOWLEDGED = "acknowledged"  # a person closed it with `healops resolve`
+RECOVERED = "recovered"  # the signal went back to normal without any fix by HealOps
+STATUSES = frozenset(
+    {IN_PROGRESS, AWAITING_APPROVAL, ESCALATED, RESOLVED, ACKNOWLEDGED, RECOVERED}
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
@@ -108,7 +111,8 @@ def _parse(text: str) -> datetime:
 
 APPROVE = "approve"
 REJECT = "reject"
-DECISION_ACTIONS = frozenset({APPROVE, REJECT})
+ACKNOWLEDGE = "acknowledge"  # "I dealt with it": closes an escalated incident
+DECISION_ACTIONS = frozenset({APPROVE, REJECT, ACKNOWLEDGE})
 
 WAITING = "waiting"
 APPLIED = "applied"

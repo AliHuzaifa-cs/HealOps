@@ -10,10 +10,10 @@ const FILTERS = [
   { key: "all", label: "All", test: () => true },
   { key: "open", label: "Open", test: (r: IncidentRow) => ["in_progress", "awaiting_approval", "escalated"].includes(r.status) },
   { key: "awaiting", label: "Awaiting approval", test: (r: IncidentRow) => r.status === "awaiting_approval" },
-  { key: "resolved", label: "Resolved", test: (r: IncidentRow) => ["resolved", "acknowledged"].includes(r.status) },
+  { key: "resolved", label: "Resolved", test: (r: IncidentRow) => ["resolved", "acknowledged", "recovered"].includes(r.status) },
   { key: "severe", label: "Critical and high", test: (r: IncidentRow) => r.severity === "critical" || r.severity === "high" },
 ];
-const BY = { agent: "Agent", human: "Human", pending: "Pending" } as const;
+const BY = { agent: "Agent", human: "Human", self: "Recovered itself", pending: "Pending" } as const;
 
 export function Incidents({ route }: { route: Route }) {
   const range = route.query.get("range") || "7d";
@@ -37,6 +37,7 @@ export function Incidents({ route }: { route: Route }) {
         { label: "Awaiting approval", n: data.counts.awaiting, tone: "var(--warn)" },
         { label: "Resolved by agent", n: data.counts.by_agent, tone: "var(--ok)" },
         { label: "Resolved by a human", n: data.counts.by_human, tone: "var(--info)" },
+        { label: "Recovered on its own", n: data.counts.by_self, tone: "var(--soft)" },
       ]
     : [];
 

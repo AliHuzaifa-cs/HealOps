@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from healops.audit import AuditEvent, read_events
 from healops.dashboard import views
 from healops.exceptions import AuditReadError, HealOpsError
-from healops.store import APPROVE, DECISION_ACTIONS, MAX_REASON_LENGTH, StateStore
+from healops.store import ACKNOWLEDGE, APPROVE, DECISION_ACTIONS, ESCALATED, MAX_REASON_LENGTH, StateStore
 
 log = logging.getLogger("healops.dashboard")
 
@@ -224,20 +224,30 @@ class DashboardApp:
         action = data.get("action")
         reason = data.get("reason")
         if action not in DECISION_ACTIONS:
-            return _error(400, "action must be 'approve' or 'reject'")
+            return _error(400, "action must be 'approve', 'reject' or 'acknowledge'")
         if reason is not None and (not isinstance(reason, str) or len(reason) > MAX_REASON_LENGTH):
             return _error(400, "reason must be short text")
 
         incident_id = path[len(prefix) : -len(suffix)]
-        pending = next(
-            (p for p in self._store.pending() if p.incident.incident_id == incident_id), None
-        )
-        if pending is None:
-            return _error(409, "nothing is waiting for approval for this incident")
+        if action == ACKNOWLEDGE:
+            closable = next(
+                (s for s in self._store.incidents([ESCALATED]) if s.incident.incident_id == incident_id),
+                None,
+            )
+            if closable is None:
+                return _error(409, "this incident is not escalated, so there is nothing to close")
+            proposal_id = ""
+        else:
+            pending = next(
+                (p for p in self._store.pending() if p.incident.incident_id == incident_id), None
+            )
+            if pending is None:
+                return _error(409, "nothing is waiting for approval for this incident")
+            proposal_id = pending.proposal.proposal_id
         try:
             decision_id = self._store.add_decision(
                 incident_id,
-                pending.proposal.proposal_id,
+                proposal_id,
                 action,
                 self.settings.user,
                 reason or None,
@@ -249,7 +259,7 @@ class DashboardApp:
         running = beat is not None and (self._clock() - beat).total_seconds() <= (
             views.HEARTBEAT_FRESH_SECONDS
         )
-        verb = "approval" if action == APPROVE else "rejection"
+        verb = {APPROVE: "approval", ACKNOWLEDGE: "resolution"}.get(action, "rejection")
         message = f"Your {verb} is saved. HealOps applies it on its next check."
         if self.settings.demo:
             message = f"Demo: your {verb} is saved, but no real HealOps is running here to apply it."

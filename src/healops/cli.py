@@ -3,6 +3,7 @@
     healops list
     healops approve <incident-id> --by ali
     healops reject  <incident-id> --by ali --reason "not now"
+    healops resolve <incident-id> --by ali --reason "restarted the service by hand"
 
 The command never touches your application. It writes your answer to the state file;
 the running HealOps picks it up on its next check and carries it out through the usual
@@ -23,6 +24,7 @@ from healops.loader import load_config
 from healops.store import (
     APPLIED,
     APPROVE,
+    ACKNOWLEDGE,
     ESCALATED,
     REJECT,
     WAITING,
@@ -70,6 +72,20 @@ def _find_pending(store: StateStore, wanted: str) -> PendingApproval:
     matches = exact or [p for p in waiting if p.incident.incident_id.startswith(wanted)]
     if not matches:
         raise LookupError(f"nothing is waiting for approval for incident {wanted!r}")
+    if len(matches) > 1:
+        raise LookupError(f"{wanted!r} matches more than one incident; use more characters")
+    return matches[0]
+
+
+def _find_escalated(store: StateStore, wanted: str):
+    """The one escalated, still open incident whose id is `wanted` (or starts with it)."""
+    if len(wanted) < 4:
+        raise LookupError("give at least 4 characters of the incident id")
+    open_ones = store.incidents([ESCALATED])
+    exact = [s for s in open_ones if s.incident.incident_id == wanted]
+    matches = exact or [s for s in open_ones if s.incident.incident_id.startswith(wanted)]
+    if not matches:
+        raise LookupError(f"no escalated incident {wanted!r} is open (see `healops list`)")
     if len(matches) > 1:
         raise LookupError(f"{wanted!r} matches more than one incident; use more characters")
     return matches[0]
@@ -159,17 +175,22 @@ def _answer(
 ) -> int:
     store = _open(args)
     try:
-        pending = _find_pending(store, args.incident)
+        if action == ACKNOWLEDGE:
+            target = _find_escalated(store, args.incident)
+            incident, proposal_id, verb = target.incident, "", "resolution"
+        else:
+            pending = _find_pending(store, args.incident)
+            incident, proposal_id = pending.incident, pending.proposal.proposal_id
+            verb = "approval" if action == APPROVE else "rejection"
         decision_id = store.add_decision(
-            pending.incident.incident_id,
-            pending.proposal.proposal_id,
+            incident.incident_id,
+            proposal_id,
             action,
             args.by,
             getattr(args, "reason", None),
             now=now(),
         )
-        verb = "approval" if action == APPROVE else "rejection"
-        out(f"recorded your {verb} (#{decision_id}) for {pending.incident.incident_id}")
+        out(f"recorded your {verb} (#{decision_id}) for {incident.incident_id}")
         out(_heartbeat_note(store, now()))
         if args.no_wait:
             return EXIT_OK
@@ -208,13 +229,17 @@ def build_parser() -> argparse.ArgumentParser:
     listing = sub.add_parser("list", help="show approvals waiting and escalated incidents")
     common(listing)
 
-    for name, text in (("approve", "approve a waiting action"), ("reject", "refuse a waiting action")):
+    for name, text in (
+        ("approve", "approve a waiting action"),
+        ("reject", "refuse a waiting action"),
+        ("resolve", "close an escalated incident you dealt with"),
+    ):
         p = sub.add_parser(name, help=text)
         p.add_argument("incident", help="incident id (or its first characters)")
         p.add_argument("--by", required=True, help="your name, recorded in the audit log")
         p.add_argument("--no-wait", action="store_true", help="do not wait for the result")
         p.add_argument("--timeout", type=float, default=DEFAULT_WAIT_SECONDS)
-        if name == "reject":
+        if name in ("reject", "resolve"):
             p.add_argument("--reason", help="why (optional)")
         common(p)
 
@@ -240,7 +265,8 @@ def main(
             return cmd_list(args, out, now())
         if args.timeout <= 0:
             raise ValueError("--timeout must be positive")
-        return _answer(args, APPROVE if args.command == "approve" else REJECT, out, now, sleep)
+        action = {"approve": APPROVE, "reject": REJECT, "resolve": ACKNOWLEDGE}[args.command]
+        return _answer(args, action, out, now, sleep)
     except (LookupError, ValueError, FileNotFoundError, HealOpsError) as error:
         out(f"error: {error}")
         return EXIT_USAGE

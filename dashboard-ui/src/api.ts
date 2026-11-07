@@ -48,7 +48,7 @@ export function useApi<T>(path: string) {
 
 export async function decide(
   incidentId: string,
-  action: "approve" | "reject",
+  action: "approve" | "reject" | "acknowledge",
   reason: string,
 ): Promise<{ message: string; agent_running: boolean }> {
   const response = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/decision`, {

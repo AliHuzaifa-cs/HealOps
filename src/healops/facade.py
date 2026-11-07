@@ -109,6 +109,7 @@ class HealOps:
             store=self._store,
             clock=clock,
             warn_after_checks=config.warn_unreported_after_checks,
+            recovery_checks=config.recovery_checks,
         )
         self.restored: RestoreReport = self._loop.restore()
         if config.dry_run:
@@ -222,8 +223,8 @@ class HealOps:
     ) -> HandleResult:
         return self._loop.reject(incident_id, proposal_id, approver, reason)
 
-    def acknowledge(self, incident_id: str) -> None:
-        self._loop.acknowledge(incident_id)
+    def acknowledge(self, incident_id: str, by: str | None = None, reason: str | None = None) -> None:
+        self._loop.acknowledge(incident_id, by, reason)
 
     def _require_apps(self) -> None:
         if len(self._registry) == 0:

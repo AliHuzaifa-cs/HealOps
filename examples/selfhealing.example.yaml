@@ -26,6 +26,7 @@ max_recovery_attempts: 3
 # never reported (a typo in a metric name would otherwise silently disable that check).
 # 0 switches the warning off.
 warn_unreported_after_checks: 5
+recovery_checks: 3
 
 # Time limits for calls into your application's adapter. A call that takes longer is
 # treated as failed; an action that times out is escalated to a person, never retried.

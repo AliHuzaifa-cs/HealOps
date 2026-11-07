@@ -377,3 +377,40 @@ def test_demo_never_overwrites_someones_folder(tmp_path):
     code = cli_main(["demo", "--dir", str(folder), "--no-open"], out=lines.append)
     assert code == 2
     assert (folder / "important.txt").read_text() == "keep me"
+
+
+def test_an_escalated_incident_can_be_marked_resolved_from_the_page(demo):
+    app, db = demo
+    _, page = get(app, "/api/incidents?range=7d")
+    escalated = next((r["id"] for r in page["rows"] if r["status"] == "escalated"), None)
+    resolved = next(r["id"] for r in page["rows"] if r["status"] == "resolved")
+    # a resolved incident has nothing to close
+    status, _ = post(app, f"/api/incidents/{resolved}/decision", {"action": "acknowledge"})
+    assert status == 409
+    if escalated is None:
+        return
+    _, detail = get(app, f"/api/incidents/{escalated}")
+    assert detail["can_resolve"] is True
+    status, body = post(
+        app, f"/api/incidents/{escalated}/decision", {"action": "acknowledge", "reason": "done"}
+    )
+    assert status == 200 and "resolution" in body["message"]
+    waiting = StateStore(db).waiting_decisions()
+    assert (waiting[0].action, waiting[0].reason) == ("acknowledge", "done")
+
+
+def test_recovered_incidents_are_labelled_and_not_counted_as_healed(tmp_path):
+    from healops.dashboard.views import CLOSED, handled_by, state_label
+    from healops.store import RECOVERED
+
+    assert RECOVERED in CLOSED
+    db, audit = build_demo(tmp_path / "r", now=NOW)
+    store = StateStore(db)
+    stored = store.incidents()[0]
+    store.save_incident(stored.incident, RECOVERED, "recovered on its own", now=NOW)
+    app = DashboardApp(db, audit, views.Settings(), clock=lambda: NOW)
+    snap = app._snapshot()
+    again = next(s for s in snap.incidents if s.incident.incident_id == stored.incident.incident_id)
+    assert state_label(snap, again) == ("Recovered", "idle")
+    assert handled_by(snap, again) == "self"
+    app.close()

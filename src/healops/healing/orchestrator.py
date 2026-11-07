@@ -521,6 +521,12 @@ class Orchestrator:
         """Put back an approval saved before a restart."""
         self._approvals.restore(pending)
 
+    def record_closed(self, incident: Incident, note: str) -> None:
+        """Write the closing event for an escalated incident that a person or the signal itself
+        cleared. The incident stays in its final escalated state; only the audit log and the
+        saved status say it is over."""
+        self._audit(AuditStage.RESOLVED, incident, note=note)
+
     def escalate_interrupted(self, incident: Incident) -> HandleResult:
         """An incident was being handled when HealOps stopped. It is never retried by itself:
         an action may or may not have run, so a person must look."""

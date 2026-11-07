@@ -7,7 +7,7 @@ bad model, drifting data), asks a diagnosis agent what to do, checks the proposa
 strict policies, carries it out only if allowed, and verifies that the application really
 recovered. People are asked whenever the policy says so.
 
-> **Status: alpha (0.2.0).** The core loop is built and tested, but it has been exercised
+> **Status: alpha (0.3.0).** The core loop is built and tested, but it has been exercised
 > on a toy application, not yet on production systems. Read
 > [docs/safety-and-limits.md](docs/safety-and-limits.md) before trusting it with anything
 > that matters.
@@ -122,11 +122,17 @@ state store and, if configured, email). Answer from any terminal:
 healops list
 healops approve 3f9a1c2e --by ali
 healops reject  3f9a1c2e --by ali --reason "not now"
+healops resolve 3f9a1c2e --by ali --reason "restarted it by hand"
 ```
 
 The command only records your answer in the state file; the running HealOps carries it out
 through the same policy, audit and verification path. An approval that expired is never
 applied. (`python -m healops ...` does the same.)
+
+An escalated incident is a dead end for HealOps, so it stays open until it is closed. Close it with
+`healops resolve` (or the dashboard's "Mark resolved" button) once you dealt with it, or let
+HealOps close it: after `recovery_checks` normal checks in a row (default 3) an escalated incident
+is closed as `recovered`. A recovered incident is never counted as healed by the agent.
 
 ## What is in the box
 

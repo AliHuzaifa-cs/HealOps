@@ -154,6 +154,24 @@ def _seed_observations(store: StateStore, now: datetime, rng: random.Random) -> 
         at = now - timedelta(hours=h)
         value = 0.05 + rng.random() * 0.02 + (0.26 * (1 - h / 30) if h < 30 else 0)
         rows.append(_obs("sector-energy", ObservationKind.DRIFT, "prev_return_5d", round(value, 4), at))
+    # the ranker's input features, 14 days of drift (the heat map) with two of them rising
+    features = {
+        "prev_return_5d": (0.04, 0.31), "prev_return_1d": (0.03, 0.14), "volatility_20d": (0.05, 0.12),
+        "volume_ratio": (0.02, 0.06), "market_return_1d": (0.03, 0.08), "turnover_rank": (0.01, 0.04),
+        "day_of_week": (0.01, 0.01), "sector_momentum": (0.04, 0.27),
+    }
+    for h in range(14 * 24, -1, -1):
+        at = now - timedelta(hours=h)
+        for name, (start, end) in features.items():
+            rise = (1 - h / (14 * 24)) ** 2
+            rows.append(_obs("stock-ranker", ObservationKind.DRIFT, name,
+                             round(start + (end - start) * rise + rng.random() * 0.004, 4), at))
+    # data checks the ranker sends every hour
+    for h in range(14 * 24, -1, -1):
+        at = now - timedelta(hours=h)
+        for name, value in (("data.schema_ok", 1), ("data.freshness_days", 0), ("data.symbols_total", 147),
+                            ("data.missing_symbols", 2), ("data.out_of_range", 0)):
+            rows.append(_obs("stock-ranker", ObservationKind.METRIC, name, value, at))
     # accuracy of the ranker: fine, then falling below the baseline in the last 3 days
     for h in range(14 * 24, -1, -1):
         at = now - timedelta(hours=h)

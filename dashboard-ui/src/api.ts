@@ -50,10 +50,11 @@ export async function decide(
   incidentId: string,
   action: "approve" | "reject" | "acknowledge",
   reason: string,
+  token = "",
 ): Promise<{ message: string; agent_running: boolean }> {
   const response = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/decision`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: token ? { "Content-Type": "application/json", "X-HealOps-Token": token } : { "Content-Type": "application/json" },
     body: JSON.stringify({ action, reason: reason.trim() || null }),
   });
   const body = await response.json().catch(() => ({}));

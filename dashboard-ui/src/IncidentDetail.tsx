@@ -20,6 +20,7 @@ function Confirm({
   body,
   confirmLabel,
   askReason,
+  needsToken,
   onCancel,
   onConfirm,
   busy,
@@ -28,11 +29,19 @@ function Confirm({
   body: string;
   confirmLabel: string;
   askReason: boolean;
+  needsToken?: boolean;
   onCancel: () => void;
-  onConfirm: (reason: string) => void;
+  onConfirm: (reason: string, token: string) => void;
   busy: boolean;
 }) {
   const [reason, setReason] = useState("");
+  const [token, setToken] = useState(() => {
+    try {
+      return sessionStorage.getItem("healops-token") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const first = useRef<HTMLButtonElement>(null);
   useEffect(() => first.current?.focus(), []);
   useEffect(() => {
@@ -48,9 +57,12 @@ function Confirm({
         {askReason && (
           <textarea placeholder="Why? (optional, kept in the audit trail)" maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} />
         )}
+        {needsToken && (
+          <input type="password" autoComplete="off" placeholder="Access token" value={token} onChange={(e) => setToken(e.target.value)} />
+        )}
         <div className="btns">
           <button ref={first} className="btn ghost" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="btn primary" onClick={() => onConfirm(reason)} disabled={busy}>
+          <button className="btn primary" onClick={() => onConfirm(reason, token)} disabled={busy || (!!needsToken && !token.trim())}>
             {busy ? "Saving…" : confirmLabel}
           </button>
         </div>
@@ -61,6 +73,7 @@ function Confirm({
 
 export function IncidentDetail({ id }: { id: string }) {
   const { data, error, reload } = useApi<Detail>(`/api/incidents/${encodeURIComponent(id)}`);
+  const suspect = data?.evidence.find((o) => o.kind === "drift");
   const [asking, setAsking] = useState<"approve" | "reject" | "acknowledge" | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; bad: boolean } | null>(null);
@@ -72,14 +85,24 @@ export function IncidentDetail({ id }: { id: string }) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  async function answer(action: "approve" | "reject" | "acknowledge", reason: string) {
+  async function answer(action: "approve" | "reject" | "acknowledge", reason: string, token: string) {
     setBusy(true);
     try {
-      const result = await decide(id, action, reason);
+      const result = await decide(id, action, reason, token.trim());
+      try {
+        if (token.trim()) sessionStorage.setItem("healops-token", token.trim());
+      } catch {
+        /* storage may be blocked */
+      }
       setToast({ text: result.message, bad: !result.agent_running });
       setAsking(null);
       reload();
     } catch (e) {
+      try {
+        sessionStorage.removeItem("healops-token");
+      } catch {
+        /* storage may be blocked */
+      }
       setToast({ text: e instanceof Error ? e.message : "Could not save your answer", bad: true });
       setAsking(null);
     } finally {
@@ -170,7 +193,10 @@ export function IncidentDetail({ id }: { id: string }) {
 
               <div className="card">
                 <div className="card-head">
-                  <h2>What triggered it</h2>
+                  <h2>{suspect ? `Suspect feature: ${suspect.name}` : "What triggered it"}</h2>
+                  {suspect && typeof suspect.value === "number" ? (
+                    <span className="mono" style={{ color: "var(--warn)" }}>PSI {suspect.value}</span>
+                  ) : null}
                   <Planned>DISTRIBUTION VIEW PLANNED</Planned>
                 </div>
                 <div style={{ marginTop: 12 }}>
@@ -279,9 +305,10 @@ export function IncidentDetail({ id }: { id: string }) {
               body={`Use this once you have dealt with it yourself. HealOps stops tracking it, and if the same problem comes back on ${inc.app} it opens a new incident.`}
               confirmLabel="Mark resolved"
               askReason
+              needsToken={shell?.needs_token}
               busy={busy}
               onCancel={() => setAsking(null)}
-              onConfirm={(reason) => void answer("acknowledge", reason)}
+              onConfirm={(reason, token) => void answer("acknowledge", reason, token)}
             />
           )}
           {(asking === "approve" || asking === "reject") && action && (
@@ -294,9 +321,10 @@ export function IncidentDetail({ id }: { id: string }) {
               }
               confirmLabel={asking === "approve" ? "Approve and run" : "Reject plan"}
               askReason={asking === "reject"}
+              needsToken={shell?.needs_token}
               busy={busy}
               onCancel={() => setAsking(null)}
-              onConfirm={(reason) => void answer(asking, reason)}
+              onConfirm={(reason, token) => void answer(asking, reason, token)}
             />
           )}
           {toast && <div className={"toast" + (toast.bad ? " err" : "")} role="status">{toast.text}</div>}

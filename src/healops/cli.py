@@ -22,9 +22,9 @@ from healops.exceptions import ConfigError, HealOpsError
 from healops.healing.approval import PendingApproval
 from healops.loader import load_config
 from healops.store import (
+    ACKNOWLEDGE,
     APPLIED,
     APPROVE,
-    ACKNOWLEDGE,
     ESCALATED,
     REJECT,
     WAITING,

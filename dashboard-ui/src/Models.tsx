@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { useApi } from "./api";
-import { ago } from "./format";
+import { ago, clock } from "./format";
 import { link } from "./router";
-import type { AppsPage } from "./types";
+import type { AppRow, AppsPage } from "./types";
 import { Header, Loading, Page, Planned, TONE } from "./ui";
 
 const STATUS_TONE: Record<string, keyof typeof TONE> = {
@@ -10,69 +11,136 @@ const STATUS_TONE: Record<string, keyof typeof TONE> = {
   Drifting: "warn",
   Degraded: "bad",
 };
-const COLUMNS = "minmax(120px, 1.2fr) 110px 110px 90px 70px minmax(150px, 1.4fr) 80px";
+const COLUMNS = "minmax(150px, 1.3fr) 100px 110px 100px 110px minmax(120px, 1fr)";
+
+function driftColor(value: number | null, limit: number | null): string {
+  if (value === null) return "var(--muted)";
+  if (limit !== null && value >= limit) return "var(--bad)";
+  return value >= 0.1 ? "var(--warn)" : "var(--soft)";
+}
+
+function Lineage({ app, now }: { app: AppRow | undefined; now: string }) {
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2 style={{ margin: 0 }}>{app ? `${app.app} changes` : "Changes"}</h2>
+        <span className="mono hint">selected</span>
+      </div>
+      {!app || app.changes.length === 0 ? (
+        <div className="empty">The agent has not changed this model yet.</div>
+      ) : (
+        <ol style={{ listStyle: "none", margin: "18px 0 0", padding: 0, position: "relative" }}>
+          {app.changes.map((c, i) => (
+            <li key={`${c.at}|${i}`} style={{ display: "flex", gap: 12, paddingBottom: 14, position: "relative" }}>
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <span className="dot" style={{ background: i === 0 ? "var(--accent)" : "var(--muted)", marginTop: 5 }} />
+                {i < app.changes.length - 1 && <span style={{ flex: 1, width: 1, background: "var(--line)", marginTop: 4 }} />}
+              </span>
+              <span style={{ fontSize: 13, lineHeight: 1.5, color: "var(--soft)" }}>
+                <span className="mono" style={{ color: "var(--muted)", marginRight: 8 }}>{ago(now, c.at)}</span>
+                {c.text}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+      <div className="hint" style={{ marginTop: 6, lineHeight: 1.6 }}>
+        Versions and stages (production, canary, shadow) need a model registry adapter, so they are not listed.
+      </div>
+      {app && (
+        <div className="btns">
+          <a className="btn ghost" href={link("/incidents", { q: app.app })}>Open its incidents</a>
+        </div>
+      )}
+    </section>
+  );
+}
 
 export function Models() {
   const { data, error } = useApi<AppsPage>("/api/apps");
+  const [picked, setPicked] = useState("");
   const shell = data?.shell ?? null;
+  const selected = data ? data.apps.find((a) => a.app === picked) ?? data.apps.find((a) => a.incidents.open > 0) ?? data.apps[0] : undefined;
+  const limit = data?.limits.drift ?? null;
   return (
     <Page active="models" shell={shell} error={error}>
-      <Header
-        crumb={`${shell?.environment || "local"} / models`}
-        title="Models and applications"
-        shell={shell}
-        lede="Everything HealOps is watching, how it is doing right now, and how its incidents ended."
-      />
+      <Header crumb={`${shell?.environment || "local"} / models`} title="Model registry" shell={shell}>
+        <Planned>VERSIONS NOT TRACKED YET</Planned>
+      </Header>
       {!data ? (
         <Loading />
       ) : (
-        <>
-          <section className="card" style={{ marginTop: 24 }}>
+        <div className="row" style={{ alignItems: "flex-start", marginTop: 24 }}>
+          <section className="card" style={{ flex: "3 1 640px" }}>
             <div className="tbl-wrap" style={{ marginTop: 0 }}>
-              <div className="tbl" role="table" aria-label="Applications">
+              <div className="tbl" role="table" aria-label="Models" style={{ minWidth: 700 }}>
                 <div className="tr th" role="row" style={{ gridTemplateColumns: COLUMNS }}>
-                  <span>MODEL</span><span>STATUS</span><span>LAST READING</span><span>READINGS 24H</span><span>DRIFT</span><span>INCIDENTS</span><span />
+                  <span>MODEL</span><span>STATUS</span><span>LAST READING</span><span>DRIFT</span><span>LAST RETRAIN</span><span>INCIDENTS</span>
                 </div>
-                {data.apps.map((a) => (
-                  <div className="tr" role="row" key={a.app} style={{ gridTemplateColumns: COLUMNS }}>
-                    <span className="mono" style={{ overflowWrap: "anywhere" }}>{a.app}</span>
-                    <span style={{ display: "flex", alignItems: "center", gap: 8, color: TONE[STATUS_TONE[a.status] ?? "idle"] }}>
-                      <span className="dot" style={{ width: 7, height: 7, background: TONE[STATUS_TONE[a.status] ?? "idle"] }} />
-                      {a.status}
-                    </span>
-                    <span style={{ color: "var(--soft)" }}>{a.last_seen ? ago(data.shell.now, a.last_seen) : "never"}</span>
-                    <span>{a.readings_24h}</span>
-                    <span>{a.drift === null ? "-" : a.drift}</span>
-                    <span style={{ color: "var(--soft)", fontSize: 12 }}>
-                      {a.incidents.total === 0
-                        ? "none yet"
-                        : `${a.incidents.open} open · ${a.incidents.by_agent} healed by the agent · ${a.incidents.by_human} by a person · ${a.incidents.by_self} on their own`}
-                    </span>
-                    <a href={link("/incidents", { q: a.app })}>View</a>
-                  </div>
-                ))}
+                {data.apps.map((a) => {
+                  const tone = TONE[STATUS_TONE[a.status] ?? "idle"];
+                  const on = selected?.app === a.app;
+                  return (
+                    <div
+                      className="tr"
+                      role="row"
+                      key={a.app}
+                      tabIndex={0}
+                      onClick={() => setPicked(a.app)}
+                      onKeyDown={(e) => e.key === "Enter" && setPicked(a.app)}
+                      style={{ gridTemplateColumns: COLUMNS, cursor: "pointer", background: on ? "rgba(139,124,246,0.07)" : undefined }}
+                    >
+                      <span className="mono" style={{ display: "flex", alignItems: "center", gap: 10, overflowWrap: "anywhere" }}>
+                        <span className="dot" style={{ background: tone }} />
+                        {a.app}
+                      </span>
+                      <span style={{ color: tone }}>{a.status}</span>
+                      <span style={{ color: "var(--soft)" }}>{a.last_seen ? ago(data.shell.now, a.last_seen) : "never"}</span>
+                      <span className="mono" style={{ color: driftColor(a.drift, limit) }}>{a.drift === null ? "-" : `PSI ${a.drift.toFixed(2)}`}</span>
+                      <span style={{ color: "var(--soft)" }} title={a.last_retrain ? clock(a.last_retrain) : undefined}>
+                        {a.last_retrain ? ago(data.shell.now, a.last_retrain) : "none yet"}
+                      </span>
+                      <span style={{ color: "var(--soft)", fontSize: 12 }}>
+                        {a.incidents.total === 0
+                          ? "none yet"
+                          : `${a.incidents.open} open · ${a.incidents.by_agent + a.incidents.by_human + a.incidents.by_self} closed`}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
               {data.apps.length === 0 && <div className="empty">HealOps has not seen any application yet.</div>}
             </div>
+            <div className="hint" style={{ marginTop: 14, lineHeight: 1.6 }}>
+              “Drift” is the latest PSI the application reported. “Last retrain” is when the agent last started a retrain.
+              Click a row to see what the agent changed on that model.
+            </div>
             {data.apps.some((a) => a.signals.length > 0) && (
-              <div className="hint" style={{ marginTop: 14, lineHeight: 1.6 }}>
+              <div className="hint" style={{ marginTop: 10, lineHeight: 1.6 }}>
                 {data.apps.map((a) => `${a.app} reports: ${a.signals.join(", ")}`).join(" · ")}
               </div>
             )}
           </section>
 
-          <section className="card" style={{ marginTop: 16 }}>
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <h2 style={{ margin: 0 }}>Versions, stages and accuracy</h2>
-              <Planned>NOT TRACKED YET</Planned>
-            </div>
-            <div className="hint" style={{ marginTop: 12, lineHeight: 1.6 }}>
-              HealOps does not know a model's version, stage (production, canary, shadow), last retrain or accuracy
-              against a baseline, because the application has not told it. A model registry adapter will add that.
-              Nothing is faked here.
-            </div>
-          </section>
-        </>
+          <div style={{ flex: "1 1 320px", display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+            <Lineage app={selected} now={data.shell.now} />
+            <section className="card">
+              <h2>Release gates</h2>
+              {data.gates.length === 0 ? (
+                <div className="empty">No retrain policy to show without a config file.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 16, fontSize: 13 }}>
+                  {data.gates.map((g) => (
+                    <div key={g.label} style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                      <span>{g.label}</span>
+                      <span className="mono" style={{ fontSize: 11, color: TONE[g.tone] }}>{g.tag}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
       )}
     </Page>
   );

@@ -38,15 +38,15 @@ from healops.healing.orchestrator import HandleResult, HandleStatus, Orchestrato
 from healops.interfaces import DriftProvider, HealthProvider, MetricsProvider
 from healops.registry import ApplicationRegistry
 from healops.store import (
-    ACKNOWLEDGED,
     ACKNOWLEDGE,
-    RECOVERED,
+    ACKNOWLEDGED,
     APPLIED,
     APPROVE,
     AWAITING_APPROVAL,
     ESCALATED,
     FAILED,
     IN_PROGRESS,
+    RECOVERED,
     RESOLVED,
     StateStore,
 )

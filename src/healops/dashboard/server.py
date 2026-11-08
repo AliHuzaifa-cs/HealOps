@@ -8,6 +8,7 @@ file exactly like `healops approve`, and the running HealOps carries it out.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import mimetypes
@@ -22,7 +23,14 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from healops.audit import AuditEvent, read_events
 from healops.dashboard import views
 from healops.exceptions import AuditReadError, HealOpsError
-from healops.store import ACKNOWLEDGE, APPROVE, DECISION_ACTIONS, ESCALATED, MAX_REASON_LENGTH, StateStore
+from healops.store import (
+    ACKNOWLEDGE,
+    APPROVE,
+    DECISION_ACTIONS,
+    ESCALATED,
+    MAX_REASON_LENGTH,
+    StateStore,
+)
 
 log = logging.getLogger("healops.dashboard")
 
@@ -97,7 +105,7 @@ class DashboardApp:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.settings = settings if settings is not None else views.Settings()
-        self._store = StateStore(db_path)
+        self._store = StateStore(db_path, repair=False)
         self._audit_path = Path(audit_path) if audit_path else None
         self._static = static_dir if static_dir is not None else STATIC_DIR
         self._hosts = LOCAL_HOSTS | {h.lower() for h in extra_hosts}
@@ -159,7 +167,7 @@ class DashboardApp:
         except HealOpsError as error:
             log.warning("request failed: %s", error)
             return _error(500, "HealOps could not read its saved state")
-        except Exception:  # noqa: BLE001 - never leak internals to the browser
+        except Exception:
             log.exception("unexpected error")
             return _error(500, "unexpected error")
 
@@ -192,9 +200,11 @@ class DashboardApp:
                 text.encode("utf-8"),
             )
         if path == "/api/signals":
-            return _json(200, {"shell": views.shell(snap), **views.signals_page(snap, query.get("range"))})
+            return _json(200, {"shell": views.shell(snap), **views.signals_page(snap, query.get("range"), query.get("app"))})
         if path == "/api/apps":
             return _json(200, {"shell": views.shell(snap), **views.apps_page(snap)})
+        if path == "/api/integrations":
+            return _json(200, {"shell": views.shell(snap), **views.integrations_page(snap)})
         if path == "/api/agent":
             return _json(200, {"shell": views.shell(snap), **views.agent_page(snap, query.get("q"))})
         if path.startswith("/api/incidents/"):
@@ -213,6 +223,11 @@ class DashboardApp:
             return _error(
                 403, "answers from the dashboard are off; start it with --allow-actions"
             )
+        token = self.settings.action_token
+        if token and not hmac.compare_digest(
+            headers.get("x-healops-token", "").encode(), token.encode()
+        ):
+            return _error(401, "wrong or missing access token")
         if not headers.get("content-type", "").lower().startswith("application/json"):
             return _error(415, "send JSON")
         origin = headers.get("origin")
@@ -223,8 +238,8 @@ class DashboardApp:
         try:
             data = json.loads(body or b"{}")
             if not isinstance(data, dict):
-                raise ValueError
-        except ValueError:
+                raise TypeError
+        except (ValueError, TypeError):
             return _error(400, "invalid JSON")
 
         action = data.get("action")
@@ -313,16 +328,16 @@ def _handler(app: DashboardApp) -> type[BaseHTTPRequestHandler]:
             if send_body:
                 self.wfile.write(response.body)
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             self._serve(True)
 
-        def do_HEAD(self) -> None:  # noqa: N802
+        def do_HEAD(self) -> None:
             self._serve(False)
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             self._serve(True)
 
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        def log_message(self, format: str, *args: object) -> None:
             log.debug("%s - %s", self.address_string(), format % args)
 
     return Handler

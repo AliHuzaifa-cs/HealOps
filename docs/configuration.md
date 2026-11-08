@@ -19,6 +19,8 @@ environment variable** (`api_key_env`, `password_env`) and set the variable in y
 | `audit_log_path` | `healops_audit.jsonl` | Append-only record of every step. `null` keeps it in memory. |
 | `state_db_path` | `healops_state.db` | SQLite file with observations, incidents, approvals and alerts. `null` keeps it in memory (nothing survives a restart). |
 | `state_retention_days` | `30` | Observations older than this are deleted. Incidents are kept. |
+| `state_backup_hours` | `12` | A safe copy of the state file is made this often, in a `backups` folder next to it (`0` turns it off). If the file is ever damaged, it is moved aside and the newest healthy copy is put in its place. |
+| `state_backup_keep` | `7` | How many backup copies to keep. |
 | `max_recovery_attempts` | `3` | Recovery actions tried for one incident (1 to 10) before a person takes over. |
 | `recovery_checks` | `3` | Close an escalated incident by itself after this many normal checks in a row (status `recovered`; it is not counted as healed by the agent). `0` turns it off. |
 | `warn_unreported_after_checks` | `5` | Warn once about anything the config watches that the application never reported. `0` turns the warning off. |

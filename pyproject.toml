@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "healops"
-version = "0.3.1"
+version = "0.3.3"
 description = "Safe, model-agnostic self-healing for machine-learning applications: detect, diagnose, check against policy, act, verify."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -20,6 +20,7 @@ from healops.capabilities import Capabilities
 from healops.config import HealOpsConfig
 from healops.detection.thresholds import build_threshold_detector
 from healops.events import Incident, _now
+from healops.exceptions import StateStoreError
 from healops.guard import GuardedAdapter
 from healops.healing.approval import ApprovalQueue, PendingApproval
 from healops.healing.history import ActionHistory
@@ -197,7 +198,16 @@ class HealOps:
     def tick(self) -> TickReport:
         """One check-detect-heal cycle."""
         self._require_apps()
-        return self._loop.tick()
+        report = self._loop.tick()
+        self._backup_state()
+        return report
+
+    def _backup_state(self) -> None:
+        """Keep a recent copy of the state file. A failed backup never stops monitoring."""
+        try:
+            self._store.maybe_backup(self.config.state_backup_hours, self.config.state_backup_keep)
+        except StateStoreError as error:
+            logging.getLogger("healops").warning("state backup skipped: %s", error)
 
     def stop(self) -> None:
         self._loop.stop()

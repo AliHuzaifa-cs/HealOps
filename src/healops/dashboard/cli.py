@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import ipaddress
+import os
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +31,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     dash.add_argument("--by", default=None, help="your name, recorded when you answer an approval")
     dash.add_argument("--name", default=None, help="workspace name shown in the sidebar")
     dash.add_argument("--env", default="", help="environment label shown in the sidebar, e.g. production")
+    dash.add_argument(
+        "--action-token",
+        default=None,
+        help="secret needed to approve from this page (or set HEALOPS_ACTION_TOKEN); required off this computer",
+    )
     dash.add_argument(
         "--allow-actions",
         action="store_true",
@@ -66,6 +72,10 @@ def _find_audit(args: argparse.Namespace, config: HealOpsConfig | None, db: Path
     return None
 
 
+def _token(args: argparse.Namespace) -> str:
+    return (getattr(args, "action_token", None) or os.environ.get("HEALOPS_ACTION_TOKEN", "")).strip()
+
+
 def _settings(args: argparse.Namespace, config: HealOpsConfig | None, demo: bool):
     from healops.dashboard.views import Settings
 
@@ -74,6 +84,7 @@ def _settings(args: argparse.Namespace, config: HealOpsConfig | None, demo: bool
         environment=args.env,
         user=args.by or getpass.getuser(),
         actions_enabled=bool(args.allow_actions),
+        action_token=_token(args),
         demo=demo,
     )
     if config is not None:
@@ -158,8 +169,11 @@ def run_dashboard(args: argparse.Namespace, out: Callable[[str], None] = print) 
             "To look around with sample data, run: healops demo"
         )
         return EXIT_USAGE
-    if args.allow_actions and not _is_local(args.host):
-        out("error: --allow-actions is only allowed when listening on this computer (127.0.0.1), because the page has no login yet")
+    if args.allow_actions and not _is_local(args.host) and not _token(args):
+        out(
+            "error: --allow-actions on a non-local address needs an access token "
+            "(set HEALOPS_ACTION_TOKEN or use --action-token), because the page has no login yet"
+        )
         return EXIT_USAGE
     if not 0 < args.port < 65536:
         out("error: --port must be between 1 and 65535")
@@ -199,5 +213,25 @@ def run_demo(args: argparse.Namespace, out: Callable[[str], None] = print) -> in
     settings.user = "demo"
     settings.drift_threshold = 0.25
     settings.metric_baselines = {"direction_accuracy": 0.52}
+    settings.dry_run = True
+    settings.agent = {
+        "mode": "Dry run",
+        "diagnosis": "rules only",
+        "check_interval_seconds": 300,
+        "consecutive_breaches": 2,
+        "min_confidence_for_auto": 0.8,
+        "max_recovery_attempts": 2,
+        "recovery_checks": 3,
+        "approval_timeout_seconds": 3600,
+        "email_alerts": False,
+    }
+    settings.policies = [
+        {"action": "any other action", "verdict": "needs_approval", "max_retries": 1, "cooldown_seconds": 3600},
+        {"action": "request_retraining", "verdict": "needs_approval", "max_retries": 1, "cooldown_seconds": 604800},
+        {"action": "restart_component", "verdict": "allow", "max_retries": 2, "cooldown_seconds": 600},
+        {"action": "reload_model", "verdict": "allow", "max_retries": 2, "cooldown_seconds": 600},
+        {"action": "rollback_model", "verdict": "needs_approval", "max_retries": 1, "cooldown_seconds": 3600},
+        {"action": "run_diagnostic", "verdict": "allow", "max_retries": 3, "cooldown_seconds": 0},
+    ]
     app = DashboardApp(db, audit, settings)
     return _run(app, "127.0.0.1", args.port, out, not args.no_open)

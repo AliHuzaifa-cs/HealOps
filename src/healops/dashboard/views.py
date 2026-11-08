@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -99,7 +100,7 @@ def humanize(value: str) -> str:
 def _num(value: Any) -> float | None:
     if isinstance(value, bool):
         return 1.0 if value else 0.0
-    if isinstance(value, (int, float)) and value == value:
+    if isinstance(value, (int, float)) and not math.isnan(value):
         return float(value)
     return None
 
@@ -112,6 +113,7 @@ class Settings:
     environment: str = ""
     user: str = "local"
     actions_enabled: bool = False
+    action_token: str = ""  # when set, every approval must send it
     dry_run: bool | None = None
     drift_threshold: float | None = None
     metric_thresholds: dict[str, float] = field(default_factory=dict)
@@ -134,6 +136,7 @@ class Snapshot:
     observations: list[Observation]
     heartbeat: datetime | None
     audit_ok: bool = True
+    store: StateStore | None = None
 
     def events_for(self, incident_id: str) -> list[AuditEvent]:
         return self.events.get(incident_id, [])
@@ -161,6 +164,7 @@ def take_snapshot(
         observations=store.observations(since=now - horizon, limit=MAX_OBSERVATIONS),
         heartbeat=store.last_beat(),
         audit_ok=audit_ok,
+        store=store,
     )
 
 
@@ -286,6 +290,7 @@ def shell(snap: Snapshot) -> dict[str, Any]:
         "user": settings.user,
         "demo": settings.demo,
         "actions_enabled": settings.actions_enabled,
+        "needs_token": bool(settings.action_token),
         "audit_ok": snap.audit_ok,
         "agent": {"running": running, "age_s": age, "note": note},
         "badges": {
@@ -849,7 +854,14 @@ def incident_detail(snap: Snapshot, incident_id: str) -> dict[str, Any] | None:
 # ---------- drift and service signals ----------
 
 SIGNAL_POINTS = 120
-_KIND_ORDER = {"drift": 0, "health": 1, "metric": 2}
+HEATMAP_DAYS = 14
+MAX_HEATMAP_ROWS = 30
+MAX_SERVICE_CHARTS = 16
+DATA_PREFIX = "data."
+FEATURE_PREFIX = "feature_psi."  # a metric the application sends for display only: it opens no incident
+DEFAULT_DRIFT_LIMIT = 0.25
+_BUCKET_SECONDS = {"24h": 900, "7d": 7200, "30d": 21600}
+_KIND_ORDER = {"health": 0, "metric": 1}
 
 
 def _downsample(points: list[tuple[datetime, float]], count: int, worst_low: bool) -> list[dict]:
@@ -865,57 +877,191 @@ def _downsample(points: list[tuple[datetime, float]], count: int, worst_low: boo
     return out
 
 
-def signals_page(snap: Snapshot, range_name: str | None = None) -> dict[str, Any]:
-    """Every stored reading in the period, one series per (application, signal)."""
-    key, window = _window(range_name)
-    start = snap.now - window
-    series: dict[tuple[str, str, str], list[tuple[datetime, float]]] = {}
-    for o in snap.observations:
-        if o.timestamp < start:
-            continue
-        value = _num(o.value)
-        if value is None:
-            continue
-        series.setdefault((o.app_name, o.kind.value, o.name), []).append((o.timestamp, value))
+def _tile(label, value, note, tag, tone) -> dict[str, str]:
+    return {"label": label, "value": value, "note": note, "tag": tag, "tone": tone}
 
-    items = []
-    for (app, kind, name), points in series.items():
-        points.sort(key=lambda p: p[0])
-        values = [v for _, v in points]
-        if kind == "drift":
-            threshold = snap.settings.drift_threshold
-        elif kind == "metric":
-            threshold = snap.settings.metric_thresholds.get(name)
+
+def _days_old(days: float) -> str:
+    n = max(0, round(days))
+    return "Today" if n == 0 else ("1 day old" if n == 1 else f"{n} days old")
+
+
+def _check_tiles(values: dict[str, float]) -> list[dict[str, str]]:
+    """The four data checks, from the `data.*` readings the application sends (if it does)."""
+    none = ("NO DATA", "idle")
+    tiles = []
+
+    schema = values.get("data.schema_ok")
+    if schema is None:
+        tiles.append(_tile("Schema", "Not reported", "The application does not send this check", *none))
+    elif schema >= 1:
+        tiles.append(_tile("Schema", "Matches", "Columns are what the model expects", "PASS", "ok"))
+    else:
+        tiles.append(_tile("Schema", "Changed", "Columns differ from what the model expects", "FAIL", "bad"))
+
+    age = values.get("data.freshness_days")
+    if age is None:
+        tiles.append(_tile("Freshness", "Not reported", "The application does not send this check", *none))
+    else:
+        tag, tone = ("PASS", "ok") if age <= 4 else (("WARN", "warn") if age <= 7 else ("FAIL", "bad"))
+        tiles.append(_tile("Freshness", _days_old(age), "Latest daily bar received", tag, tone))
+
+    missing, total = values.get("data.missing_symbols"), values.get("data.symbols_total")
+    if missing is None:
+        tiles.append(_tile("Missing symbols", "Not reported", "The application does not send this check", *none))
+    else:
+        text = f"{missing:g} of {total:g}" if total else f"{missing:g}"
+        if missing == 0:
+            tag, tone = "PASS", "ok"
+        elif total and missing / total <= 0.1:
+            tag, tone = "WARN", "warn"
         else:
-            threshold = None
-        if kind == "health":
-            breaches = sum(1 for v in values if v < 1)
-        elif threshold is not None:
-            breaches = sum(1 for v in values if v > threshold)
-        else:
-            breaches = 0
-        items.append(
-            {
-                "app": app,
-                "kind": kind,
-                "name": name,
-                "label": humanize(name),
-                "latest": values[-1],
-                "latest_at": _iso(points[-1][0]),
-                "min": min(values),
-                "max": max(values),
-                "avg": sum(values) / len(values),
-                "readings": len(values),
-                "threshold": threshold,
-                "breaches": breaches,
-                "points": _downsample(points, SIGNAL_POINTS, worst_low=(kind == "health")),
-            }
+            tag, tone = ("WARN", "warn") if not total else ("FAIL", "bad")
+        note = "Every symbol has its latest row" if missing == 0 else "Symbols with no row for the latest day"
+        tiles.append(_tile("Missing symbols", text, note, tag, tone))
+
+    bad = values.get("data.out_of_range")
+    if bad is None:
+        tiles.append(_tile("Values out of range", "Not reported", "The application does not send this check", *none))
+    else:
+        tiles.append(
+            _tile(
+                "Values out of range",
+                f"{bad:g}",
+                "All values inside limits" if bad == 0 else "Prices or volumes outside sane limits",
+                "PASS" if bad == 0 else "WARN",
+                "ok" if bad == 0 else "warn",
+            )
         )
-    items.sort(key=lambda i: (i["app"], _KIND_ORDER.get(i["kind"], 9), i["name"]))
+    return tiles
+
+
+def _heat_name(kind: str, name: str) -> str | None:
+    """The heat map row a reading belongs to: a drift score, or a per-feature PSI metric."""
+    if kind == "drift":
+        return name
+    if kind == "metric" and name.startswith(FEATURE_PREFIX):
+        return name[len(FEATURE_PREFIX):]
+    return None
+
+
+def signals_page(
+    snap: Snapshot, range_name: str | None = None, app: str | None = None
+) -> dict[str, Any]:
+    """Data checks, a 14-day drift heat map, and a chart per health/speed/error signal."""
+    key, window = _window(range_name)
+    apps = _apps(snap)
+    app = app if app in apps else None
+    store = snap.store
+    latest = store.latest_readings() if store is not None else []
+    latest = [r for r in latest if app is None or r.app_name == app]
+
+    # ---- data checks: newest `data.*` value, whichever application sent it
+    values: dict[str, tuple[datetime, float]] = {}
+    for r in latest:
+        if r.name.startswith(DATA_PREFIX) and (r.name not in values or r.at >= values[r.name][0]):
+            values[r.name] = (r.at, r.value)
+    checks = _check_tiles({k: v for k, (_, v) in values.items()})
+
+    # ---- heat map: one row per drift signal, one cell per day (its highest reading)
+    today = int(snap.now.timestamp() // 86400)
+    first = today - (HEATMAP_DAYS - 1)
+    days = [_iso(datetime.fromtimestamp((first + i) * 86400, UTC)) for i in range(HEATMAP_DAYS)]
+    cells: dict[tuple[str, str], list[float | None]] = {}
+    if store is not None:
+        for b in store.series_buckets(datetime.fromtimestamp(first * 86400, UTC), 86400):
+            name = _heat_name(b.kind, b.name)
+            if name is None or (app is not None and b.app_name != app):
+                continue
+            index = int(b.start.timestamp() // 86400) - first
+            if 0 <= index < HEATMAP_DAYS:
+                cells.setdefault((b.app_name, name), [None] * HEATMAP_DAYS)[index] = round(b.high, 4)
+    newest = {
+        (r.app_name, _heat_name(r.kind, r.name)): r.value
+        for r in latest
+        if _heat_name(r.kind, r.name) is not None
+    }
+    rows = [
+        {
+            "app": a,
+            "name": n,
+            "cells": c,
+            "latest": None if (a, n) not in newest else round(newest[(a, n)], 4),
+        }
+        for (a, n), c in cells.items()
+    ]
+    rows.sort(key=lambda r: (-(r["latest"] if r["latest"] is not None else -1), r["app"], r["name"]))
+    limit = snap.settings.drift_threshold or DEFAULT_DRIFT_LIMIT
+
+    # ---- charts for health, speed, errors and the other metrics
+    watched = set(snap.settings.metric_thresholds) | set(snap.settings.metric_baselines)
+    service: list[dict[str, Any]] = []
+    if store is not None:
+        grouped: dict[tuple[str, str, str], list] = {}
+        for b in store.series_buckets(snap.now - window, _BUCKET_SECONDS[key]):
+            if b.kind == "drift" or b.name.startswith((DATA_PREFIX, FEATURE_PREFIX)):
+                continue
+            if app is not None and b.app_name != app:
+                continue
+            grouped.setdefault((b.app_name, b.kind, b.name), []).append(b)
+        newest_by = {(r.app_name, r.kind, r.name): r for r in latest}
+        for (a, kind, name), buckets in grouped.items():
+            health = kind == "health"
+            threshold = None if health else snap.settings.metric_thresholds.get(name)
+            readings = sum(b.count for b in buckets)
+            lows = [b.low for b in buckets]
+            highs = [b.high for b in buckets]
+            now_reading = newest_by.get((a, kind, name))
+            if health:
+                over = sum(1 for b in buckets if b.low < 1)
+            elif threshold is not None:
+                over = sum(1 for b in buckets if b.high > threshold)
+            else:
+                over = 0
+            service.append(
+                {
+                    "app": a,
+                    "kind": kind,
+                    "name": name,
+                    "label": humanize(name),
+                    "latest": buckets[-1].last if now_reading is None else now_reading.value,
+                    "latest_at": _iso(buckets[-1].start if now_reading is None else now_reading.at),
+                    "min": min(lows),
+                    "max": max(highs),
+                    "avg": sum(b.mean * b.count for b in buckets) / readings,
+                    "readings": readings,
+                    "threshold": threshold,
+                    "breaches": over,
+                    "watched": name in watched or health or threshold is not None,
+                    "points": _downsample(
+                        [(b.start + timedelta(seconds=_BUCKET_SECONDS[key]), b.low if health else b.high) for b in buckets],
+                        SIGNAL_POINTS,
+                        worst_low=health,
+                    ),
+                }
+            )
+    service.sort(key=lambda s: (not s["watched"], _KIND_ORDER.get(s["kind"], 9), s["app"], s["name"]))
+    more = max(0, len(service) - MAX_SERVICE_CHARTS)
+
+    drift_incident = next(
+        (
+            s.incident.incident_id
+            for s in snap.incidents
+            if s.status in ACTIVE
+            and s.incident.incident_type is IncidentType.DATA_DRIFT
+            and (app is None or s.incident.app_name == app)
+        ),
+        None,
+    )
     return {
         "range": key,
-        "drift": [i for i in items if i["kind"] == "drift"],
-        "service": [i for i in items if i["kind"] != "drift"],
+        "app": app,
+        "apps": apps,
+        "checks": checks,
+        "heatmap": {"days": days, "rows": rows[:MAX_HEATMAP_ROWS], "hidden": max(0, len(rows) - MAX_HEATMAP_ROWS), "limit": limit},
+        "service": service[:MAX_SERVICE_CHARTS],
+        "more_service": more,
+        "related_incident": drift_incident,
     }
 
 
@@ -926,13 +1072,31 @@ def apps_page(snap: Snapshot) -> dict[str, Any]:
     day_ago = snap.now - timedelta(hours=24)
     latest_drift = _latest_drift(snap)
     rows = []
+    newest_first = sorted(snap.all_events, key=lambda e: e.created_at, reverse=True)
     for app in _apps(snap):
         mine = [s for s in snap.incidents if s.incident.app_name == app]
         seen = [o for o in snap.observations if o.app_name == app]
         closed = [s for s in mine if s.status in CLOSED]
+        its_events = [e for e in newest_first if e.app_name == app]
+        retrain = next(
+            (
+                e
+                for e in its_events
+                if e.stage is AuditStage.ACTION_STARTING
+                and _payload_text(e, "action_type", "action") == "request_retraining"
+            ),
+            None,
+        )
+        changes = [
+            {"at": _iso(e.created_at), "text": describe_event(e)}
+            for e in its_events
+            if e.stage is AuditStage.ACTION_FINISHED
+        ][:4]
         rows.append(
             {
                 "app": app,
+                "last_retrain": _iso(retrain.created_at) if retrain else None,
+                "changes": changes,
                 "status": _app_status(snap, app),
                 "last_seen": _iso(max((o.timestamp for o in seen), default=None)),
                 "readings_24h": sum(1 for o in seen if o.timestamp >= day_ago),
@@ -949,11 +1113,57 @@ def apps_page(snap: Snapshot) -> dict[str, Any]:
         )
     return {
         "apps": rows,
+        "gates": _release_gates(snap.settings),
         "limits": {
             "drift": snap.settings.drift_threshold,
             "metrics": dict(snap.settings.metric_thresholds),
         },
     }
+
+
+def _release_gates(settings: Settings) -> list[dict[str, str]]:
+    """The rules a retrain has to pass, taken from the policies the agent really runs with."""
+    gates: list[dict[str, str]] = []
+    by_action = {p["action"]: p for p in settings.policies}
+    retrain = by_action.get("request_retraining") or by_action.get("any other action")
+    if retrain is None:
+        return gates
+    verdict = retrain["verdict"]
+    if verdict == "needs_approval":
+        gates.append({"label": "A person approves every retrain", "tag": "REQUIRED", "tone": "ok"})
+    elif verdict == "allow":
+        gates.append({"label": "Retrains run without asking", "tag": "ALLOWED", "tone": "warn"})
+    else:
+        gates.append({"label": "Retrains never run", "tag": "BLOCKED", "tone": "bad"})
+    gates.append(
+        {
+            "label": f"At most {retrain['max_retries']} {'try' if retrain['max_retries'] == 1 else 'tries'} per incident",
+            "tag": "LIMIT",
+            "tone": "ok",
+        }
+    )
+    if retrain["cooldown_seconds"]:
+        gates.append(
+            {
+                "label": f"Wait {_span(retrain['cooldown_seconds'])} between tries",
+                "tag": "LIMIT",
+                "tone": "ok",
+            }
+        )
+    if settings.dry_run is True:
+        gates.append({"label": "Dry run: nothing is deployed", "tag": "ON", "tone": "warn"})
+    return gates
+
+
+def _span(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds % 86400 == 0 and seconds >= 86400:
+        days = seconds // 86400
+        return f"{days} day" + ("" if days == 1 else "s")
+    if seconds % 3600 == 0 and seconds >= 3600:
+        hours = seconds // 3600
+        return f"{hours} hour" + ("" if hours == 1 else "s")
+    return f"{max(1, seconds // 60)} min"
 
 
 # ---------- the agent: how it is set up, and everything it did ----------
@@ -983,11 +1193,48 @@ def agent_page(snap: Snapshot, query: str | None = None, limit: int = 100) -> di
                     "text": text,
                 }
             )
+    waiting = [
+        {
+            "id": s.incident.incident_id,
+            "short": short_id(s.incident.incident_id),
+            "title": s.incident.summary,
+            "severity": s.incident.severity.value,
+            "app": s.incident.app_name,
+            "opened": _iso(s.incident.detected_at),
+        }
+        for s in sorted(snap.incidents, key=lambda s: s.incident.detected_at, reverse=True)
+        if s.status == AWAITING_APPROVAL
+    ]
     return {
+        "waiting": waiting,
+        "audit_ok": snap.audit_ok,
+        "dry_run": snap.settings.dry_run,
         "setup": dict(snap.settings.agent),
         "policies": list(snap.settings.policies),
         "events": rows,
         "matched": matched,
         "total": len(events),
         "query": needle,
+    }
+
+
+# ---------- integrations: what HealOps is connected to ----------
+
+
+def integrations_page(snap: Snapshot) -> dict[str, Any]:
+    apps = _apps(snap)
+    last = max((o.timestamp for o in snap.observations), default=None)
+    interval = snap.settings.agent.get("check_interval_seconds")
+    fresh_for = max(900, 3 * int(interval)) if isinstance(interval, (int, float)) else 3600
+    live = last is not None and (snap.now - last).total_seconds() <= fresh_for
+    return {
+        "adapter": {
+            "apps": apps,
+            "last_seen": _iso(last),
+            "status": "connected" if live else ("silent" if apps else "none"),
+        },
+        "email": snap.settings.agent.get("email_alerts"),
+        "actions_enabled": snap.settings.actions_enabled,
+        "user": snap.settings.user,
+        "dry_run": snap.settings.dry_run,
     }

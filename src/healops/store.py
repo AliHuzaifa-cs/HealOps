@@ -9,6 +9,8 @@ happened, this is the current picture.
 import json
 import logging
 import math
+import os
+import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Sequence
@@ -123,6 +125,30 @@ MAX_REASON_LENGTH = 500
 
 
 @dataclass(frozen=True, slots=True)
+class SeriesBucket:
+    """One time slice of one series: its lowest, highest, average and last reading."""
+
+    app_name: str
+    kind: str
+    name: str
+    start: datetime
+    low: float
+    high: float
+    mean: float
+    last: float
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class LatestReading:
+    app_name: str
+    kind: str
+    name: str
+    value: float
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Decision:
     """A person's answer to a waiting approval, written by the command line and applied by the
     running HealOps (only the running process holds the connection to the application)."""
@@ -159,24 +185,132 @@ class StoredIncident:
     updated_at: datetime
 
 
+BACKUP_DIR_NAME = "backups"
+QUICK_CHECK_MAX_BYTES = 512 * 1024 * 1024  # a larger file is not scanned at every start
+
+
 class StateStore:
     """SQLite-backed state. Safe to share between threads; one connection, one lock."""
 
-    def __init__(self, path: str | Path = MEMORY, retention_days: int = 30) -> None:
+    def __init__(
+        self,
+        path: str | Path = MEMORY,
+        retention_days: int = 30,
+        repair: bool = True,
+    ) -> None:
+        """Open the state file.
+
+        If the file is damaged and ``repair`` is on, the damaged file is moved aside (never
+        deleted) and the newest healthy backup takes its place. ``repair`` is off for readers
+        such as the dashboard, which must never replace a file the monitor is writing.
+        """
         if retention_days < 1:
             raise ValueError("retention_days must be at least 1")
         self._retention = timedelta(days=retention_days)
         self._lock = threading.Lock()
         self._path = str(path)
+        self.restored_from: str | None = None
         try:
             if self._path != MEMORY:
                 Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-            self._db = sqlite3.connect(self._path, check_same_thread=False)
-            self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA busy_timeout=5000")
-            self._prepare()
+            try:
+                self._open()
+            except sqlite3.DatabaseError:
+                if self._path == MEMORY or not repair or not self._restore_from_backup():
+                    raise
         except sqlite3.Error as error:
             raise StateStoreError(f"cannot open the state file ({type(error).__name__})") from None
+
+    def _open(self) -> None:
+        self._db = sqlite3.connect(self._path, check_same_thread=False)
+        try:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=5000")
+            small = self._path != MEMORY and Path(self._path).stat().st_size <= QUICK_CHECK_MAX_BYTES
+            if small and self._db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            self._prepare()
+        except BaseException:
+            self._db.close()
+            raise
+
+    # ----- backups: a copy taken while the file is in use, and a way back from damage -----
+
+    @property
+    def backup_dir(self) -> Path:
+        return Path(self._path).parent / BACKUP_DIR_NAME
+
+    def backups(self) -> list[Path]:
+        """Healthy-looking backup files, newest first."""
+        if self._path == MEMORY or not self.backup_dir.is_dir():
+            return []
+        return sorted(self.backup_dir.glob("state-*.db"), reverse=True)
+
+    def backup(self, keep: int = 7) -> Path | None:
+        """Copy the state file with SQLite's own backup, which is safe while it is being written."""
+        if self._path == MEMORY:
+            return None
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        final = self.backup_dir / f"state-{stamp}.db"
+        temp = self.backup_dir / f"state-{stamp}.tmp"
+        try:
+            with self._lock:
+                target = sqlite3.connect(temp)
+                try:
+                    self._db.backup(target)
+                    if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise sqlite3.DatabaseError("the copy did not pass the integrity check")
+                finally:
+                    target.close()
+            os.replace(temp, final)
+        except (sqlite3.Error, OSError) as error:
+            temp.unlink(missing_ok=True)
+            raise StateStoreError(f"cannot back up the state file ({type(error).__name__})") from None
+        for old in self.backups()[max(keep, 1):]:
+            old.unlink(missing_ok=True)
+        return final
+
+    def maybe_backup(self, every_hours: float, keep: int = 7) -> Path | None:
+        """Back up if the newest backup is older than ``every_hours`` (0 turns backups off)."""
+        if self._path == MEMORY or every_hours <= 0:
+            return None
+        found = self.backups()
+        if found:
+            age = datetime.now(UTC).timestamp() - found[0].stat().st_mtime
+            if age < every_hours * 3600:
+                return None
+        return self.backup(keep)
+
+    def _restore_from_backup(self) -> bool:
+        path = Path(self._path)
+        for candidate in self.backups():
+            try:
+                check = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
+                try:
+                    healthy = check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                finally:
+                    check.close()
+            except sqlite3.Error:
+                healthy = False
+            if not healthy:
+                continue
+            stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+            for suffix in ("", "-wal", "-shm"):
+                part = Path(self._path + suffix)
+                if part.exists():
+                    shutil.move(str(part), str(part) + f".damaged-{stamp}")
+            shutil.copy2(candidate, path)
+            try:
+                self._open()
+            except sqlite3.DatabaseError:
+                continue
+            self.restored_from = candidate.name
+            logging.getLogger("healops").warning(
+                "the state file was damaged; it was moved aside and %s was restored", candidate.name
+            )
+            return True
+        return False
 
     @property
     def path(self) -> str:
@@ -283,6 +417,38 @@ class StateStore:
                 )
             )
         return found
+
+    def series_buckets(self, since: datetime, bucket_seconds: int) -> list[SeriesBucket]:
+        """Every series since `since`, cut into slices of `bucket_seconds`, grouped in SQL.
+
+        This reads a few hundred rows however many readings were stored, so a page can cover
+        weeks of history without loading each reading."""
+        if bucket_seconds < 1:
+            raise ValueError("bucket_seconds must be at least 1")
+        sql = (
+            "SELECT app_name, kind, name, CAST(strftime('%s', ts) AS INTEGER) / ? AS slot, "
+            "MIN(value), MAX(value), AVG(value), COUNT(value), MAX(ts), value "
+            "FROM observations WHERE ts >= ? AND value IS NOT NULL "
+            "GROUP BY app_name, kind, name, slot ORDER BY app_name, name, slot"
+        )
+        rows = self._run(lambda db: db.execute(sql, (bucket_seconds, _stamp(since))).fetchall())
+        return [
+            SeriesBucket(
+                app, kind, name, datetime.fromtimestamp(slot * bucket_seconds, UTC),
+                low, high, mean, last, count,
+            )
+            for app, kind, name, slot, low, high, mean, count, _newest, last in rows
+        ]
+
+    def latest_readings(self) -> list[LatestReading]:
+        """The newest reading of every series."""
+        sql = (
+            "SELECT app_name, kind, name, value, ts FROM observations WHERE id IN "
+            "(SELECT MAX(id) FROM observations GROUP BY app_name, kind, name) "
+            "AND value IS NOT NULL"
+        )
+        rows = self._run(lambda db: db.execute(sql).fetchall())
+        return [LatestReading(app, kind, name, value, _parse(ts)) for app, kind, name, value, ts in rows]
 
     def prune(self, now: datetime) -> int:
         """Delete observations older than the retention period. Incidents are kept."""

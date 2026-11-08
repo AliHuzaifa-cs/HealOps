@@ -419,19 +419,64 @@ def test_recovered_incidents_are_labelled_and_not_counted_as_healed(tmp_path):
 # ---------- drift/signals, applications and agent pages ----------
 
 
-def test_signals_page_has_one_series_per_signal(demo):
+def test_signals_page_has_checks_heatmap_and_charts(demo):
     app, _ = demo
     status, page = get(app, "/api/signals?range=7d")
     assert status == 200
-    assert page["range"] == "7d"
-    assert page["drift"], "the demo has drift readings"
-    for item in page["drift"] + page["service"]:
+    assert page["range"] == "7d" and page["app"] is None
+    assert [c["label"] for c in page["checks"]] == ["Schema", "Freshness", "Missing symbols", "Values out of range"]
+    by = {c["label"]: c for c in page["checks"]}
+    assert by["Schema"]["tag"] == "PASS" and by["Schema"]["value"] == "Matches"
+    assert by["Missing symbols"]["value"] == "2 of 147" and by["Missing symbols"]["tag"] == "WARN"
+    assert by["Freshness"]["value"] == "Today"
+
+    heat = page["heatmap"]
+    assert len(heat["days"]) == views.HEATMAP_DAYS and heat["limit"] == 0.25
+    assert heat["rows"] and all(len(r["cells"]) == views.HEATMAP_DAYS for r in heat["rows"])
+    ranker = {r["name"]: r for r in heat["rows"] if r["app"] == "stock-ranker"}
+    assert "prev_return_5d" in ranker
+    assert ranker["prev_return_5d"]["latest"] > 0.25
+    cells = [c for c in ranker["prev_return_5d"]["cells"] if c is not None]
+    assert cells == sorted(cells)  # rising over the 14 days
+    assert not any(r["name"].startswith("data.") for r in heat["rows"])
+
+    for item in page["service"]:
         assert item["points"] and len(item["points"]) <= views.SIGNAL_POINTS
-        assert item["min"] <= item["latest"] <= item["max"]
-        assert item["readings"] >= 1
-    assert all(i["kind"] == "drift" for i in page["drift"])
-    assert all(i["kind"] != "drift" for i in page["service"])
-    assert page["drift"][0]["threshold"] == 0.25
+        assert item["min"] <= item["avg"] <= item["max"]
+        assert not item["name"].startswith("data.") and item["kind"] != "drift"
+    assert page["related_incident"] is not None
+
+
+def test_signals_page_can_be_limited_to_one_application(demo):
+    app, _ = demo
+    _, page = get(app, "/api/signals?range=7d&app=market-direction")
+    assert page["app"] == "market-direction"
+    assert all(r["app"] == "market-direction" for r in page["heatmap"]["rows"])
+    assert all(s["app"] == "market-direction" for s in page["service"])
+    assert {c["tag"] for c in page["checks"]} == {"NO DATA"}  # that application sends no checks
+    _, unknown = get(app, "/api/signals?app=no-such-app")
+    assert unknown["app"] is None
+
+
+def test_signals_history_is_not_cut_by_the_reading_limit(tmp_path, monkeypatch):
+    """The page asks the database for slices, so 14 days show even with a tiny reading cap."""
+    db, audit = build_demo(tmp_path / "cap", now=NOW)
+    monkeypatch.setattr(views, "MAX_OBSERVATIONS", 50)
+    app = DashboardApp(db, audit, views.Settings(drift_threshold=0.25), clock=lambda: NOW)
+    _, page = get(app, "/api/signals?range=7d")
+    ranker = next(r for r in page["heatmap"]["rows"] if r["name"] == "prev_return_5d" and r["app"] == "stock-ranker")
+    assert sum(c is not None for c in ranker["cells"]) >= 13
+    app.close()
+
+
+def test_check_tiles_without_data_say_so():
+    tiles = views._check_tiles({})
+    assert all(t["tag"] == "NO DATA" and t["value"] == "Not reported" for t in tiles)
+    tiles = views._check_tiles(
+        {"data.schema_ok": 0, "data.freshness_days": 6, "data.missing_symbols": 30, "data.symbols_total": 147, "data.out_of_range": 3}
+    )
+    assert [t["tag"] for t in tiles] == ["FAIL", "WARN", "FAIL", "WARN"]
+    assert tiles[1]["value"] == "6 days old"
 
 
 def test_downsampling_keeps_the_worst_reading():
@@ -490,9 +535,10 @@ def test_agent_page_needs_no_config(demo):
 
 
 def test_dashboard_cli_reads_agent_setup_from_the_config(tmp_path):
+    import argparse
+
     from healops.dashboard.cli import _settings
     from healops.loader import load_config
-    import argparse
 
     cfg = tmp_path / "c.yaml"
     cfg.write_text("dry_run: true\nrecovery_checks: 4\npolicies:\n  restart_component:\n    verdict: allow\n", encoding="utf-8")
@@ -503,3 +549,92 @@ def test_dashboard_cli_reads_agent_setup_from_the_config(tmp_path):
     actions = [p["action"] for p in settings.policies]
     assert actions[0] == "any other action" and "restart_component" in actions
     assert "api_key" not in str(settings.agent)
+
+
+# ---------- 0.3.3: models, agent and integrations pages ----------
+
+
+def test_apps_page_reports_last_retrain_changes_and_gates(demo):
+    app, _ = demo
+    _, page = get(app, "/api/apps")
+    cement = next(a for a in page["apps"] if a["app"] == "sector-cement")
+    assert cement["last_retrain"] is not None
+    assert cement["changes"] and "sector-cement" in cement["changes"][0]["text"]
+    quiet = next(a for a in page["apps"] if a["app"] == "sector-autos")
+    assert quiet["last_retrain"] is None and quiet["changes"] == []
+    assert page["gates"] == []  # the fixture gives no policies
+
+
+def test_release_gates_follow_the_retrain_policy():
+    settings = views.Settings(
+        dry_run=False,
+        policies=[
+            {"action": "any other action", "verdict": "allow", "max_retries": 1, "cooldown_seconds": 0},
+            {"action": "request_retraining", "verdict": "needs_approval", "max_retries": 2, "cooldown_seconds": 7 * 86400},
+        ],
+    )
+    gates = views._release_gates(settings)
+    assert gates[0] == {"label": "A person approves every retrain", "tag": "REQUIRED", "tone": "ok"}
+    assert "At most 2 tries" in gates[1]["label"]
+    assert gates[2]["label"] == "Wait 7 days between tries"
+    assert views._release_gates(views.Settings()) == []
+
+
+def test_agent_page_lists_what_waits_for_a_person(demo):
+    app, _ = demo
+    _, page = get(app, "/api/agent")
+    assert len(page["waiting"]) == 1
+    assert page["waiting"][0]["severity"] == "critical"
+    assert page["audit_ok"] is True
+
+
+def test_integrations_page_says_what_is_connected(demo):
+    app, _ = demo
+    _, page = get(app, "/api/integrations")
+    assert page["adapter"]["status"] == "connected"
+    assert len(page["adapter"]["apps"]) == 12
+    assert page["email"] is None  # no config file, so unknown
+    assert page["actions_enabled"] is True
+    assert page["user"] == "tester"
+
+
+def test_feature_psi_metrics_fill_the_heat_map_without_a_chart(demo):
+    from healops.events import Observation
+    from healops.types import ObservationKind
+
+    app, db = demo
+    store = StateStore(db)
+    store.add_observations(
+        [
+            Observation("stock-ranker", ObservationKind.METRIC, "feature_psi.ret_5", 0.12, NOW - timedelta(days=2)),
+            Observation("stock-ranker", ObservationKind.METRIC, "feature_psi.ret_5", 0.31, NOW - timedelta(hours=1)),
+        ]
+    )
+    store.close()
+    _, page = get(app, "/api/signals?range=7d&app=stock-ranker")
+    row = next(r for r in page["heatmap"]["rows"] if r["name"] == "ret_5")
+    assert row["latest"] == 0.31
+    assert [c for c in row["cells"] if c is not None] == [0.12, 0.31]
+    assert not any(s["name"].startswith("feature_psi.") for s in page["service"])
+
+
+def test_token_is_required_when_set(tmp_path):
+    db, audit = build_demo(tmp_path / "t", now=NOW)
+    settings = views.Settings(actions_enabled=True, action_token="s3cret")
+    app = DashboardApp(db, audit, settings, clock=lambda: NOW)
+    path = f"/api/incidents/{ranker_id(app)}/decision"
+    assert get(app, "/api/overview")[1]["shell"]["needs_token"] is True
+    assert post(app, path, {"action": "approve"})[0] == 401
+    assert post(app, path, {"action": "approve"}, {"X-HealOps-Token": "wrong"})[0] == 401
+    assert StateStore(db).waiting_decisions() == []
+    assert post(app, path, {"action": "approve"}, {"X-HealOps-Token": "s3cret"})[0] == 200
+    app.close()
+
+
+def test_actions_on_a_network_address_need_a_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("HEALOPS_ACTION_TOKEN", raising=False)
+    db = tmp_path / "s.db"
+    StateStore(db).close()
+    lines: list[str] = []
+    args = ["dashboard", "--db", str(db), "--allow-actions", "--host", "0.0.0.0", "--port", "0"]
+    assert cli_main(args, out=lines.append) == 2 and "access token" in " ".join(lines)

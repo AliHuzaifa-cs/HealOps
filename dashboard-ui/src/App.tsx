@@ -3,6 +3,7 @@ import { IncidentDetail } from "./IncidentDetail";
 import { Incidents } from "./Incidents";
 import { Models } from "./Models";
 import { Overview } from "./Overview";
+import { Integrations } from "./Integrations";
 import { PLANNED, PlannedPage } from "./PlannedPage";
 import { useRoute } from "./router";
 import { Signals } from "./Signals";
@@ -16,6 +17,7 @@ export function App() {
   if (path === "/drift") return <Signals route={route} />;
   if (path === "/models") return <Models />;
   if (path === "/agent") return <AgentPolicies />;
+  if (path === "/integrations") return <Integrations />;
   if (PLANNED[path]) return <PlannedPage info={PLANNED[path]} />;
   return <Overview route={route} />;
 }

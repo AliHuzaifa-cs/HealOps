@@ -49,6 +49,14 @@ to confirm that the tests really fail when a safeguard is removed.
   `examples/live_email_check.py` against your own account before relying on it.
 - **Language-model latency.** A local model can take tens of seconds per diagnosis; the
   monitoring loop waits for it.
+- **The dashboard has no user accounts.** Approve/reject buttons work on this computer
+  (`--allow-actions`). Off this computer they need one shared secret: start with
+  `HEALOPS_ACTION_TOKEN=<secret>` (or `--action-token`) and the page asks for it. Reading the
+  page is not protected, so keep it on a private network.
+- **State is backed up and self-repairing.** Every `state_backup_hours` the state file is
+  copied to a `backups/` folder; if the file is ever found damaged it is set aside as
+  `*.damaged-<time>` and the newest good backup is restored. Keep the state file on a local
+  disk (in Docker, a named volume), never a Windows bind mount.
 - **Not a security product.** HealOps recovers ML applications; it does not defend them.
 
 ## Reporting a problem

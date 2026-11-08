@@ -8,6 +8,7 @@ export interface Shell {
   user: string;
   demo: boolean;
   actions_enabled: boolean;
+  needs_token?: boolean;
   audit_ok: boolean;
   agent: { running: boolean; age_s: number | null; note: string };
   badges: { incidents: number; models: number; agent: number };
@@ -101,13 +102,32 @@ export interface SignalItem {
   readings: number;
   threshold: number | null;
   breaches: number;
+  watched: boolean;
   points: { at: string; value: number }[];
+}
+export interface CheckTile {
+  label: string;
+  value: string;
+  note: string;
+  tag: string;
+  tone: "ok" | "warn" | "bad" | "idle";
+}
+export interface HeatRow {
+  app: string;
+  name: string;
+  cells: (number | null)[];
+  latest: number | null;
 }
 export interface SignalsPage {
   shell: Shell;
   range: string;
-  drift: SignalItem[];
+  app: string | null;
+  apps: string[];
+  checks: CheckTile[];
+  heatmap: { days: string[]; rows: HeatRow[]; hidden: number; limit: number };
   service: SignalItem[];
+  more_service: number;
+  related_incident: string | null;
 }
 
 export interface AppRow {
@@ -117,11 +137,14 @@ export interface AppRow {
   readings_24h: number;
   signals: string[];
   drift: number | null;
+  last_retrain: string | null;
+  changes: { at: string; text: string }[];
   incidents: { total: number; open: number; by_agent: number; by_human: number; by_self: number };
 }
 export interface AppsPage {
   shell: Shell;
   apps: AppRow[];
+  gates: { label: string; tag: string; tone: "ok" | "warn" | "bad" }[];
   limits: { drift: number | null; metrics: Record<string, number> };
 }
 
@@ -133,12 +156,32 @@ export interface AgentEvent {
   incident_id: string;
   text: string;
 }
+export interface WaitingItem {
+  id: string;
+  short: string;
+  title: string;
+  severity: string;
+  app: string;
+  opened: string;
+}
 export interface AgentPageData {
   shell: Shell;
+  waiting: WaitingItem[];
+  audit_ok: boolean;
+  dry_run: boolean | null;
   setup: Record<string, string | number | boolean>;
   policies: { action: string; verdict: string; max_retries: number; cooldown_seconds: number }[];
   events: AgentEvent[];
   matched: number;
   total: number;
   query: string;
+}
+
+export interface IntegrationsPage {
+  shell: Shell;
+  adapter: { apps: string[]; last_seen: string | null; status: "connected" | "silent" | "none" };
+  email: boolean | null;
+  actions_enabled: boolean;
+  user: string;
+  dry_run: boolean | null;
 }

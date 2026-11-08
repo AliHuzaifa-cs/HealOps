@@ -209,6 +209,9 @@ class HealOpsConfig(_StrictModel):
     audit_log_path: str | None = "healops_audit.jsonl"
     state_db_path: str | None = "healops_state.db"
     state_retention_days: int = Field(default=30, ge=1, le=3650)
+    # A safe copy of the state file every this many hours (0 = never), and how many to keep.
+    state_backup_hours: float = Field(default=12, ge=0, le=720)
+    state_backup_keep: int = Field(default=7, ge=1, le=100)
     max_recovery_attempts: int = Field(default=3, ge=1, le=10)
     warn_unreported_after_checks: int = Field(default=5, ge=0, le=100000)
     # Close an escalated incident by itself after this many normal checks in a row (0 = never).

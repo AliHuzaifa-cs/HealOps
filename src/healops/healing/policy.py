@@ -87,7 +87,11 @@ class PolicyEngine:
 
         reasons = [f"configuration verdict for {action.value} is {policy.verdict.value}"]
         verdict = policy.verdict
-        threshold = self._config.min_confidence_for_auto
+        threshold = (
+            policy.min_confidence
+            if policy.min_confidence is not None
+            else self._config.min_confidence_for_auto
+        )
         if verdict is PolicyVerdict.ALLOW and diagnosis.confidence < threshold:
             verdict = PolicyVerdict.NEEDS_APPROVAL
             reasons.append(

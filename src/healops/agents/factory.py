@@ -5,7 +5,8 @@ from collections.abc import Mapping
 from healops.agents.base import ComponentSpec, DiagnosisAgent
 from healops.agents.fallback import FallbackAgent
 from healops.agents.llm import LLMDiagnosisAgent
-from healops.agents.mock import MockDiagnosisAgent
+from healops.agents.mock import DEFAULT_PLAYBOOK, MockDiagnosisAgent
+from healops.agents.playbook import PlaybookGuard, TargetRouter
 from healops.agents.ratelimit import RateLimitedAgent
 from healops.config import HealOpsConfig, LLMConfig
 from healops.llm.base import LLMProvider
@@ -19,6 +20,7 @@ from healops.llm.providers import (
     OpenAICompatibleProvider,
     ollama_provider,
 )
+from healops.types import ActionType, IncidentType
 
 _DEFAULT_KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 
@@ -59,27 +61,45 @@ def build_provider(
     )
 
 
+def build_playbook(config: HealOpsConfig) -> dict[IncidentType, tuple[ActionType, ...]]:
+    """The built-in playbook with the incident types the configuration replaces."""
+    merged = dict(DEFAULT_PLAYBOOK)
+    for incident_type, steps in config.playbook.items():
+        merged[incident_type] = tuple(steps)
+    return merged
+
+
 def build_agent(
     config: HealOpsConfig,
     component: ComponentSpec = "application",
     transport: Transport | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> DiagnosisAgent:
-    """The rule-based agent, or an LLM agent (with a rule-based safety net) if configured."""
-    rules = MockDiagnosisAgent(component=component)
+    """The rule-based agent, or an LLM agent (with a rule-based safety net) if configured.
+
+    The playbook and the restart targets of the configuration apply to either.
+    """
+    playbook = build_playbook(config)
+    rules = MockDiagnosisAgent(component=component, playbook=playbook)
     llm = config.llm
-    if llm is None:
-        return rules
-    provider = build_provider(llm, transport=transport, environ=environ)
-    agent = LLMDiagnosisAgent(
-        provider,
-        component=component,
-        max_tokens=llm.max_tokens,
-        max_confidence=llm.max_confidence,
-    )
-    limited: DiagnosisAgent = agent
-    if llm.max_calls_per_hour is not None:
-        limited = RateLimitedAgent(agent, llm.max_calls_per_hour, per_seconds=3600.0)
-    if not llm.use_fallback:
-        return limited
-    return FallbackAgent(limited, rules, confidence_cap=llm.fallback_confidence_cap)
+    agent: DiagnosisAgent = rules
+    if llm is not None:
+        provider = build_provider(llm, transport=transport, environ=environ)
+        model_agent: DiagnosisAgent = LLMDiagnosisAgent(
+            provider,
+            component=component,
+            max_tokens=llm.max_tokens,
+            max_confidence=llm.max_confidence,
+        )
+        if llm.max_calls_per_hour is not None:
+            model_agent = RateLimitedAgent(model_agent, llm.max_calls_per_hour, per_seconds=3600.0)
+        if llm.enforce_playbook:
+            model_agent = PlaybookGuard(model_agent, playbook)
+        agent = (
+            FallbackAgent(model_agent, rules, confidence_cap=llm.fallback_confidence_cap)
+            if llm.use_fallback
+            else model_agent
+        )
+    if config.restart_targets:
+        agent = TargetRouter(agent, config.restart_targets)
+    return agent

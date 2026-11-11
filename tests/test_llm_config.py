@@ -106,14 +106,23 @@ def test_the_agent_is_an_llm_agent_wrapped_in_a_fallback_by_default():
 
 
 def test_the_fallback_can_be_switched_off():
+    from healops.agents.playbook import PlaybookGuard
     from healops.agents.ratelimit import RateLimitedAgent
 
-    agent = build_agent(cfg(provider="ollama", model="m", use_fallback=False))
+    agent = build_agent(
+        cfg(provider="ollama", model="m", use_fallback=False, enforce_playbook=False)
+    )
     assert isinstance(agent, RateLimitedAgent)  # the default budget still applies
     bare = build_agent(
-        cfg(provider="ollama", model="m", use_fallback=False, max_calls_per_hour=None)
+        cfg(
+            provider="ollama", model="m", use_fallback=False, max_calls_per_hour=None,
+            enforce_playbook=False,
+        )
     )
     assert isinstance(bare, LLMDiagnosisAgent)
+    # by default a model answer must be a playbook step
+    guarded = build_agent(cfg(provider="ollama", model="m", use_fallback=False))
+    assert isinstance(guarded, PlaybookGuard)
 
 
 def test_the_configured_fallback_cap_is_used_when_the_model_server_is_down():

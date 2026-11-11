@@ -40,6 +40,7 @@ def code_blocks(text, language="python"):
         config_module.AdapterTimeoutsConfig,
         config_module.LLMConfig,
         config_module.EmailConfig,
+        config_module.DockerConfig,
     ],
 )
 def test_every_config_option_is_in_the_reference(model):

@@ -13,6 +13,8 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from healops.adapters.docker import DockerRestarter, DockerServiceAdapter
+from healops.adapters.docker import Request as DockerRequest
 from healops.agents.base import DiagnosisAgent
 from healops.agents.factory import build_agent
 from healops.audit import AuditLog, JsonlAuditLog, MemoryAuditLog
@@ -58,12 +60,14 @@ class HealOps:
         transport: Transport | None = None,
         environ: Mapping[str, str] | None = None,
         smtp_factory: SmtpFactory | None = None,
+        docker_request: DockerRequest | None = None,
     ) -> None:
         if isinstance(config, (str, Path)):
             config = load_config(config)
         elif not isinstance(config, HealOpsConfig):
             config = HealOpsConfig.model_validate(dict(config))
         self.config = config
+        self._docker_request = docker_request
 
         self._registry = ApplicationRegistry()
         self._components: dict[str, str] = {}
@@ -162,6 +166,17 @@ class HealOps:
         """
         if component is not None and not component.strip():
             raise ValueError("component must be a non-empty string")
+        if self.config.docker is not None:
+            docker = self.config.docker
+            adapter = DockerServiceAdapter(
+                adapter,
+                DockerRestarter(
+                    docker.restartable_services,
+                    socket_path=docker.socket_path,
+                    stop_timeout_seconds=docker.stop_timeout_seconds,
+                    request=self._docker_request,
+                ),
+            )
         if component is None and Capabilities.discover(adapter).has(ComponentRestarter):
             raise ValueError(
                 f"{name!r} can restart components, so register it with component='<name>'"

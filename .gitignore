@@ -16,3 +16,7 @@ build/
 node_modules/
 dashboard-ui/dist/
 healops_demo/
+
+.env
+
+.env

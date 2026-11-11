@@ -80,6 +80,7 @@ listed. Actions: `restart_component`, `reload_model`, `rollback_model`, `request
 | `verdict` | `needs_approval` | `allow` (run without asking), `needs_approval` (a person decides) or `deny` (never). |
 | `max_retries` | `1` | Retries after the first run, per incident. |
 | `cooldown_seconds` | `300` | Minimum time between runs of the same action on the same application. |
+| `min_confidence` | none | Confidence needed to run this action without a person. Left out, the top-level `min_confidence_for_auto` applies. Use it only for an action that is safe and easy to undo (a restart), so a weak diagnosis does not hold it up. |
 
 ## `adapter_timeouts`
 
@@ -110,6 +111,47 @@ Leave the section out to use the rule-based agent only.
 | `max_calls_per_hour` | `20` | Budget for model calls. `null` removes the limit. |
 | `use_fallback` | `true` | When the model fails or the budget is used up, the rule-based agent answers instead. |
 | `fallback_confidence_cap` | `0.2` | Confidence cap for those fallback answers, so a person decides. |
+| `enforce_playbook` | `true` | Refuse a model answer that is not a `playbook` step for the incident type; the rule-based agent then answers. |
+
+## `docker` (optional)
+
+Lets HealOps restart docker compose services through the Docker engine, for example an API
+container that stopped answering. Leave the section out and no container can be touched.
+The container that runs HealOps needs the Docker socket (`/var/run/docker.sock`); whoever can
+use that socket controls Docker on the computer, so use it on a computer you own and give it
+only to the HealOps container. HealOps calls only the engine's `restart` for the services listed
+here, found by their docker compose service label. A restart of any other component goes to
+your adapter as before.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `restartable_services` | required | One to twenty service names HealOps may restart. |
+| `socket_path` | `/var/run/docker.sock` | Where the Docker engine listens. |
+| `stop_timeout_seconds` | `10` | How long Docker waits for the container to stop before it kills it. |
+
+## `playbook` and `restart_targets` (optional)
+
+`playbook` replaces the actions tried, in order, for an incident type; the other incident types
+keep the built-in playbook. `restart_targets` names the component a restart is aimed at, per
+incident type, whichever agent (rules or model) proposed it.
+
+```yaml
+playbook:
+  high_error_rate: [restart_component, run_diagnostic, escalate]
+restart_targets:
+  high_error_rate: api      # a failing API is fixed by restarting the api service
+docker:
+  restartable_services: [api]
+policies:
+  restart_component:
+    verdict: allow
+    min_confidence: 0.1     # a restart is safe, so even a weak diagnosis may run it
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `playbook` | built-in | Incident type (such as `high_error_rate`) to a list of actions. `escalate` is the last resort. |
+| `restart_targets` | none | Incident type to the component a restart is aimed at. |
 
 ## `email` (optional)
 

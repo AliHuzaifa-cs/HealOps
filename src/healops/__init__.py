@@ -2,6 +2,6 @@
 
 from healops.facade import HealOps, SelfHealingAgent
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 __all__ = ["HealOps", "SelfHealingAgent", "__version__"]

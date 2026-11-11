@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from healops.capabilities import FRAMEWORK_ACTIONS
-from healops.types import ActionType, PolicyVerdict
+from healops.types import ActionType, IncidentType, PolicyVerdict
 
 
 class _StrictModel(BaseModel):
@@ -66,6 +66,10 @@ class ActionPolicy(_StrictModel):
     verdict: PolicyVerdict = PolicyVerdict.NEEDS_APPROVAL
     max_retries: int = Field(default=1, ge=0, le=10)
     cooldown_seconds: int = Field(default=300, ge=0)
+    # Confidence needed to run this action without a person. None means the global
+    # `min_confidence_for_auto`. Use it for an action that is safe and easy to undo (a restart),
+    # so that a weak diagnosis (for example the rules after a model timed out) does not hold it up.
+    min_confidence: float | None = Field(default=None, ge=0, le=1)
 
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -90,6 +94,9 @@ class LLMConfig(_StrictModel):
     max_calls_per_hour: int | None = Field(default=20, ge=1, le=100000)
     use_fallback: bool = True
     fallback_confidence_cap: float = Field(default=0.2, ge=0, le=1)
+    # Refuse a model proposal that is not a playbook step for the incident type (then the rules
+    # answer instead). Turn it off only if you trust the model with every action.
+    enforce_playbook: bool = True
 
     @field_validator("model")
     @classmethod
@@ -191,6 +198,25 @@ class EmailConfig(_StrictModel):
         return self
 
 
+_SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+
+
+class DockerConfig(_StrictModel):
+    """Docker compose services HealOps may restart (needs the Docker socket). Leave it out for none."""
+
+    restartable_services: list[str] = Field(min_length=1, max_length=20)
+    socket_path: str = "/var/run/docker.sock"
+    stop_timeout_seconds: int = Field(default=10, ge=0, le=300)
+
+    @field_validator("restartable_services")
+    @classmethod
+    def _plain_service_names(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if not _SERVICE_NAME.fullmatch(name):
+                raise ValueError(f"{name!r} is not a plain docker compose service name")
+        return value
+
+
 class AdapterTimeoutsConfig(_StrictModel):
     """How long HealOps waits for the application's adapter, and when it stops trying."""
 
@@ -224,6 +250,11 @@ class HealOpsConfig(_StrictModel):
     policies: dict[ActionType, ActionPolicy] = Field(default_factory=dict)
     llm: LLMConfig | None = None
     email: EmailConfig | None = None
+    docker: DockerConfig | None = None
+    # Replaces the actions tried for an incident type (the others keep the built-in playbook).
+    playbook: dict[IncidentType, list[ActionType]] = Field(default_factory=dict)
+    # The component a restart is aimed at, per incident type (for example high_error_rate: api).
+    restart_targets: dict[IncidentType, str] = Field(default_factory=dict)
 
     @field_validator("audit_log_path", "state_db_path")
     @classmethod
@@ -252,6 +283,26 @@ class HealOpsConfig(_StrictModel):
                 raise ValueError(
                     f"{action.value} is handled by HealOps itself and cannot be configured"
                 )
+        return value
+
+    @field_validator("restart_targets")
+    @classmethod
+    def _targets_are_plain_names(cls, value: dict[IncidentType, str]) -> dict[IncidentType, str]:
+        for target in value.values():
+            if not _SERVICE_NAME.fullmatch(target):
+                raise ValueError(f"{target!r} is not a plain component name")
+        return value
+
+    @field_validator("playbook")
+    @classmethod
+    def _playbook_steps_are_not_empty(
+        cls, value: dict[IncidentType, list[ActionType]]
+    ) -> dict[IncidentType, list[ActionType]]:
+        for incident_type, steps in value.items():
+            if not steps:
+                raise ValueError(f"the playbook for {incident_type.value} has no steps")
+            if ActionType.NO_ACTION in steps:
+                raise ValueError("no_action is not a playbook step")
         return value
 
     @model_validator(mode="after")
